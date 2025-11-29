@@ -55,14 +55,14 @@ legalPlay :: Maybe Card -> Card -> Bool
 -- discard. If 7, go below instead. If 2, always legal. If 8, ignore 8. If 10,
 -- remove discard.
 legalPlay Nothing _ = True
-legalPlay (Just (Card pileRank, _)) (Card cardRank, _)
+legalPlay (Just (Card pileRank _)) (Card cardRank _)
   | cardRank == 2 || cardRank == 8 || cardRank == 10 = True
   | cardRank >= pileRank = True
   | pileRank == 7 && cardRank <= pileRank = True
   | otherwise = False
 
 validPlays :: Maybe Card -> Deck -> Deck
-validPlays pile deck = [x | x <- deck, (legalPlay pile x)]
+validPlays pile deck = [x | x <- deck, legalPlay pile x]
 
 dealCards :: Int -> State GameState Deck
 -- We take in BOTH Int and GameState, it takes in the gamestate and returns the new deck (gross why is it like this)
@@ -79,22 +79,24 @@ dealCards n = do
 
 giveWastePileTo :: Player -> State GameState ()
 giveWastePileTo player = do
-  discardPile <- gets discardPile
-  hand <- hand player
-  modify $ \x -> x {hand = hand ++ discardPile}
-  modify $\x -> x {discardPile = [Nothing]}
+  discard <- gets discardPile
+  let updatedPlayer = player { hand = hand player ++ discard }
+  updatePlayer updatedPlayer
+  modify $ \gs -> gs { discardPile = [] }
 
+updatePlayer :: Player -> State GameState ()
+updatePlayer updatedPlayer = modify $ \gs ->
+  gs { players = map (\p -> if pId p == pId updatedPlayer then updatedPlayer else p) (players gs) }
 
 replenishCards :: Player -> State GameState ()
 replenishCards player = do
-  drawPile <- gets drawPile
-  case drawPile of
-    [] -> pure []
-    (card:rest) -> do
-      hand <- hand player
-      if length hand < 3 then
-        modify $ \x -> x {hand = hand:card:(replenishCards player)}
-      else pure ()
+  draw <- gets drawPile
+  let handCards = hand player
+      nToDraw = max 0 (3 - length handCards)
+      (drawn, rest) = splitAt nToDraw draw
+      updatedPlayer = player { hand = handCards ++ drawn }
+  updatePlayer updatedPlayer
+  modify $ \gs -> gs { drawPile = rest }
 
 shuffleDeck :: StdGen -> Deck -> Deck
 shuffleDeck gen deck = [x | (x, _) <- sortBy (comparing snd) (zip deck (randoms gen :: [Int]))]
@@ -109,47 +111,52 @@ basicStrategy = do
   currentIx <- gets currentIx
   let player = players!!currentIx
   case hand player of
-    [] -> drawPile <- gets drawPile
-          if drawPile == [] then
-            case faceUp player of
-              [] -> pure (head (shuffleDeck (mkStdGen 1234) (faceDown player)))
-              xs -> pure (minimum [x | x <- (hand player), legalPlay x])
-          else
-            -- they need to pickup then
-            replenishCards player
-            pure (basicStrategy gameState)
-    xs -> pure (minimum [x | x <- (hand player), legalPlay x])
+    [] -> do
+      drawPile <- gets drawPile
+      if drawPile == [] then
+        case faceUp player of
+          [] -> pure (head (shuffleDeck (mkStdGen 1234) (faceDown $ hand player)))
+          xs -> pure (minimum [x | x <- hand player, legalPlay x])
+      else
+        -- they need to pickup then
+        replenishCards player
+        pure basicStrategy
+    _ -> pure (minimum [x | x <- (hand player), legalPlay x])
 
 applyStrategy :: State GameState ()
-applyStrategy gameState = do
-  -- update discard pile
-  card <- basicStrategy gameState
-  modify (\gs -> gs { discardPile = card : discardPile gs })
-
-  -- update player hand
-  players <- gets players
+applyStrategy = do
+  playersList <- gets players
   currentIx <- gets currentIx
-  player <- players!!currentIx
-  hand <- hand player
-  faceUp <- faceUp player
-  faceDown <- faceDown player
-  modify (\x -> x {hand = filter (x != card) (hand)})
-  modify (\x -> x {faceUp = filter (x != card) (faceUp)})
-  modify (\x -> x {faceDown = filter (x != card) (faceDown)})
-  replenishCards player
+  let player = playersList !! currentIx
+      legalCards = [c | c <- hand player, legalPlay (listToMaybe discardPile) c]
+  case legalCards of
+    [] -> replenishCards player  -- no legal play, pick up cards
+    (card:_) -> do
+      let updatedPlayer = player { hand = filter (/= card) (hand player) }
+      updatePlayer updatedPlayer
+      modify $ \gs -> gs { discardPile = card : discardPile gs }
+
+      -- delete if 10
+      discard <- gets discardPile
+      when (rank (head discard) == R10) $
+        modify $ \gs -> gs { discardPile = [] }
+
+  -- advance turn
+  nPlayers <- gets (length . players)
+  modify $ \gs -> gs { currentIx = (currentIx + 1) `mod` nPlayers }
 
   -- check after play effects
   -- https://stackoverflow.com/questions/59778472/guard-inside-do-block-haskell
   discard <- gets discardPile
   -- TODO might want to check all actions accounted for, need to add to burnedPiles
-  let action | rank head discard == R10 = modify (\x -> x {discard = []})
+  let action | rank  $ head discard == R10 = modify (\x -> x {discard = []})
              | checkTopFour discard = modify (\x -> x {discard = []})
              | otherwise = ()
   action
 
 checkTopFour :: Pile -> Bool
 checkTopFour discard
-  | length discard >= 4 = discard!!0 == discard!!1 == discard!!2 == discard!!3
+  | length discard >= 4 = rank (discard!!0) == rank (discard!!1) && rank (discard!!1) == rank (discard!!2) && rank (discard!!2) == rank (discard!!3)
   | otherwise = False
 
 -- TODO 100% not sure that this is implemented correctly
@@ -163,10 +170,10 @@ gameLoop = do
                     else
                       currentIx + 1})
   -- calls game loop at the end unless there is a winner
-  if length (faceDown (players!!currentIx)) != 0 then
+  if length (faceDown (players!!currentIx)) /= 0 then
     gameLoop 
   else
-    pure
+    pure "Winner found"
 
 playOneGame :: IO ()
 playOneGame = do
@@ -195,9 +202,7 @@ playOneGame = do
 
   let gameState = GameState  players 0 deck [] (StdGen 1234) []
   modify (\x -> x {currentIx = chooseStartingPlayer})
-
-  
-  gameLoop gameState
+  evalState gameLoop gameState
 
 
 
@@ -215,7 +220,7 @@ dealToPlayer player = do
                              , faceDown = drawnCards3
                              }
   
-  modify (\x -> x { players = map (\p -> if playerId p == playerId player 
+  modify (\x -> x { players = map (\p -> if pId p == pId player 
                                            then updatedPlayer 
                                            else p) 
                                     (players gs) })
@@ -224,13 +229,13 @@ dealToPlayer player = do
 
 chooseStartingPlayer :: State GameState ()
 chooseStartingPlayer = do
-  findStartPlayer R2
+  findStartPlayer R3
 
 findStartPlayer :: Rank -> State GameState Int
 findStartPlayer n = do
   players <- gets players
   let players = [(y, x) | x <- players, y <- ((length . filter (== n) . map rank) (hand x))]
-  if head $ hand  $ head players == n then
+  if head (hand (head players)) == n then
     pure $ pId player - 1
   else
     findStartPlayer $ succ n
@@ -246,15 +251,16 @@ basicStrategySets = do
   currentIx <- gets currentIx
   player <- players!!currentIx
   case hand player of
-    [] -> drawPile <- gets drawPile
-          if drawPile == [] then
-            case faceUp player of
-              [] -> pure (head (shuffleDeck (mkStdGen 1234) (faceDown player)))
-              xs -> pure (minimum [x | x <- (hand player), legalPlay x])
-          else
-            -- they need to pickup then
-            replenishCards player
-            pure (basicStrategy gameState)
+    [] -> do
+      drawPile <- gets drawPile
+      if drawPile == [] then
+        case faceUp player of
+          [] -> pure (head (shuffleDeck (mkStdGen 1234) (faceDown player)))
+          xs -> pure (minimum [x | x <- (hand player), legalPlay x])
+      else
+        -- they need to pickup then
+        replenishCards player
+        pure (basicStrategy gameState)
     xs -> let xs = [x | x <- (hand player), legalPlay x] in
           pure (filter (== minimum xs) xs)
 
@@ -274,9 +280,9 @@ gameLoopWithHistory = do
   else
     pure
 
-outputStats :: State GameState IO 
-outputStats = do
-  putStrLn "Start Player" ++ "h"
+-- outputStats :: State GameState IO 
+-- outputStats = do
+--   putStrLn "Start Player" ++ "h"
 
 
 runOneGameWithHistory :: IO ()
