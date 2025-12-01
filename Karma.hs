@@ -3,7 +3,14 @@ module KarmaBrief where
 import System.Random 
 import Control.Monad.State
 import Data.List 
-import Data.Ord 
+import Data.Ord
+-- check this is allowed TODO
+import Data.Maybe (listToMaybe)
+import Control.Monad (when)
+import Debug.Trace
+import System.IO.Unsafe (unsafePerformIO)
+import Control.Concurrent (threadDelay)
+import System.IO (hFlush, stdout)
 
 
 -- Cards
@@ -13,8 +20,9 @@ data Suit = Clubs | Diamonds | Hearts | Spades
 data Rank = R2 | R3 | R4 | R5 | R6 | R7 | R8 | R9 | R10 | RJ | RQ | RK | RA
   deriving (Eq, Ord, Enum, Bounded, Show, Read)
 
+-- TODO check that you can add the Ord here
 data Card = Card { rank :: Rank, suit :: Suit }
-  deriving (Eq, Show, Read)
+  deriving (Eq, Show, Read, Ord)
 
 type Deck = [Card]
 type Pile = [Card]  
@@ -29,7 +37,7 @@ data Player = Player
   , hand      :: [Card]
   , faceUp    :: [Card]
   , faceDown  :: [Card]
-  }
+  } deriving (Show)
 
 -- Game state 
 data GameState = GameState
@@ -56,9 +64,9 @@ legalPlay :: Maybe Card -> Card -> Bool
 -- remove discard.
 legalPlay Nothing _ = True
 legalPlay (Just (Card pileRank _)) (Card cardRank _)
-  | cardRank == 2 || cardRank == 8 || cardRank == 10 = True
+  | cardRank == R2 || cardRank == R8 || cardRank == R10 = True
   | cardRank >= pileRank = True
-  | pileRank == 7 && cardRank <= pileRank = True
+  | pileRank == R7 && cardRank <= pileRank = True
   | otherwise = False
 
 validPlays :: Maybe Card -> Deck -> Deck
@@ -108,50 +116,49 @@ shuffleDeck gen deck = [x | (x, _) <- sortBy (comparing snd) (zip deck (randoms 
 basicStrategy :: State GameState Deck
 basicStrategy = do
   players <- gets players
-  currentIx <- gets currentIx
-  let player = players!!currentIx
+  cId <- gets currentIx
+  discardPile <- gets discardPile
+  let player = players!!cId
+  -- if hand empty, check faceUp
+  -- if faceUp empty, check faceDown
   case hand player of
-    [] -> do
-      drawPile <- gets drawPile
-      if drawPile == [] then
-        case faceUp player of
-          [] -> pure (head (shuffleDeck (mkStdGen 1234) (faceDown $ hand player)))
-          xs -> pure (minimum [x | x <- hand player, legalPlay x])
-      else
-        -- they need to pickup then
-        replenishCards player
-        pure basicStrategy
-    _ -> pure (minimum [x | x <- (hand player), legalPlay x])
+    [] -> case faceUp player of
+            -- winner
+            [] -> pure  $ [head  $ faceDown player]
+            _ -> pure $ [minimum [x | x <- faceUp player, legalPlay (Just $ head discardPile) x]]
+    _ -> do
+      let card = [x | x <- hand player, legalPlay (Just $ head discardPile) x]
+      case card of 
+        -- if hand has no legal cards, pickup deck
+        [] -> pure []
+        _ -> pure $ [minimum card]
 
 applyStrategy :: State GameState ()
 applyStrategy = do
-  playersList <- gets players
+  players <- gets players
+  discardPile <- gets discardPile
   currentIx <- gets currentIx
-  let player = playersList !! currentIx
+  let player = players !! currentIx
       legalCards = [c | c <- hand player, legalPlay (listToMaybe discardPile) c]
   case legalCards of
-    [] -> replenishCards player  -- no legal play, pick up cards
+    [] -> giveWastePileTo player  -- no legal play, pick up cards
     (card:_) -> do
       let updatedPlayer = player { hand = filter (/= card) (hand player) }
       updatePlayer updatedPlayer
-      modify $ \gs -> gs { discardPile = card : discardPile gs }
+      modify $ \gs -> gs { discardPile = card : discardPile}
 
       -- delete if 10
-      discard <- gets discardPile
-      when (rank (head discard) == R10) $
+      if discardPile /= [] && (rank (head discardPile) == R10) then
         modify $ \gs -> gs { discardPile = [] }
-
-  -- advance turn
-  nPlayers <- gets (length . players)
-  modify $ \gs -> gs { currentIx = (currentIx + 1) `mod` nPlayers }
+      else pure ()
 
   -- check after play effects
   -- https://stackoverflow.com/questions/59778472/guard-inside-do-block-haskell
-  discard <- gets discardPile
   -- TODO might want to check all actions accounted for, need to add to burnedPiles
-  let action | rank  $ head discard == R10 = modify (\x -> x {discard = []})
-             | checkTopFour discard = modify (\x -> x {discard = []})
-             | otherwise = ()
+  
+  let action | discardPile /= [] && rank (head discardPile) == R10 = modify (\x -> x {discardPile = []})
+             | checkTopFour discardPile = modify (\x -> x {discardPile = []})
+             | otherwise = pure ()
   action
 
 checkTopFour :: Pile -> Bool
@@ -165,47 +172,82 @@ gameLoop = do
   applyStrategy
   currentIx <- gets currentIx
   players <- gets players
-  modify (\x -> x {currentIx = if currentIx == (length players) then
+  finishedOrder <- gets finishedOrder
+  discard <- gets discardPile --TODO remove this line
+  modify (\x -> x {currentIx = if currentIx == (length players) - 1 then
                       0
                     else
                       currentIx + 1})
   -- calls game loop at the end unless there is a winner
-  if length (faceDown (players!!currentIx)) /= 0 then
-    gameLoop 
-  else
-    pure "Winner found"
+  if length (hand (players!!currentIx)) == 0 && 
+     length (faceUp (players!!currentIx)) == 0 && 
+     length (faceDown (players!!currentIx)) == 0 then do
+    modify $ \x -> x {finishedOrder = finishedOrder ++ [pId (players!!currentIx)]}
+    pure "winner"
+  else do
+    -- traceM $ "CurrentIx: " ++ show currentIx
+    -- traceM $ "Player hands: " ++ show (map (length . hand) players)
+    -- traceM $ "Discard pile size: " ++ show (length discard)
+    gameLoop
 
 playOneGame :: IO ()
 playOneGame = do
-  let deck = [Card rank suit| suit <- [Clubs..Spades], rank <- [R2..RA]]
-  -- pretty sure this is 3 players
-  -- deck will always be 52 cards
-  let players = [Player id ("player"++id) [] [] [] | id <- [1..3]]
-  putStrLn "Player name: "
-  line <- getLine
-  pName <- pName players!!0
-  modify (\x -> x {pName = line})
-  dealToPlayer players!!0
+  -- get player names
+  putStrLn "Player 1 name: "
+  name1 <- getLine
+  
+  putStrLn "Player 2 name: "
+  name2 <- getLine
+  
+  putStrLn "Player 3 name: "
+  name3 <- getLine
 
-  putStrLn "Player name: "
-  line <- getLine
-  pName <- pName players!!1
-  modify (\x -> x {pName = line})
-  dealToPlayer players!!1
+  -- create the deck
+  gen <- newStdGen
+  let deck = [Card r s | s <- [Clubs .. Spades], r <- [R2 .. RA]]
+  let shuffledDeck = shuffleDeck gen deck
 
-  putStrLn "Player name: "
-  line <- getLine
-  pName <- pName players!!2
-  modify (\x -> x {pName = line})
-  dealToPlayer players !! 2
-  dealCards 9
+  -- create players
+  let initialPlayers = [ Player 0 name1 [] [] []
+                       , Player 1 name2 [] [] []
+                       , Player 2 name3 [] [] []
+                       ]
 
-  let gameState = GameState  players 0 deck [] (StdGen 1234) []
-  modify (\x -> x {currentIx = chooseStartingPlayer})
-  evalState gameLoop gameState
+          
+
+  -- create gameState
+  let initialState = GameState { players = initialPlayers
+    , currentIx = 0
+    , drawPile = shuffledDeck
+    , discardPile = []
+    , burnedPiles = []
+    , rng = gen
+    , finishedOrder = []
+    }
+
+  let finalState = execState setupAndPlay initialState
+  putStrLn $ "Game over! Winner: " ++ show (finishedOrder finalState)
 
 
+setupAndPlay :: State GameState String
+setupAndPlay = do
+  players <- gets players
+  dealToPlayer $ players!!0
+  dealToPlayer $ players!!1
+  dealToPlayer $ players!!2
+  
+  -- Choose starting player
+  startIdx <- chooseStartingPlayer
+  modify $ \gs -> gs { currentIx = startIdx }
+  
+  -- Play the game
+  gameLoop
 
+
+  
+
+
+-- Works correctly
 dealToPlayer :: Player -> State GameState Deck
 dealToPlayer player = do
   drawPile <- gets drawPile
@@ -223,20 +265,22 @@ dealToPlayer player = do
   modify (\x -> x { players = map (\p -> if pId p == pId player 
                                            then updatedPlayer 
                                            else p) 
-                                    (players gs) })
+                                    (players x) })
   
   dealCards 9
 
-chooseStartingPlayer :: State GameState ()
+chooseStartingPlayer :: State GameState Int
 chooseStartingPlayer = do
   findStartPlayer R3
 
 findStartPlayer :: Rank -> State GameState Int
 findStartPlayer n = do
+  -- gets players, filters hand to number of rank n, sorts based on that number
+  -- if first card is of right rank, then it will give them first turn
   players <- gets players
-  let players = [(y, x) | x <- players, y <- ((length . filter (== n) . map rank) (hand x))]
-  if head (hand (head players)) == n then
-    pure $ pId player - 1
+  let playersOrdRank = [(y, x) | x <- players, let y = length . filter (== n) . map rank $ hand x]
+  if (rank . head . hand . snd . head) playersOrdRank == n then
+    pure $ pId (snd (head playersOrdRank))
   else
     findStartPlayer $ succ n
   
@@ -249,24 +293,25 @@ basicStrategySets = do
 -- easiest thing to do is just to sort the hand according to rank each time
   players <- gets players
   currentIx <- gets currentIx
-  player <- players!!currentIx
+  let player = players!!currentIx
+  discardPile <- gets discardPile
   case hand player of
     [] -> do
       drawPile <- gets drawPile
       if drawPile == [] then
         case faceUp player of
-          [] -> pure (head (shuffleDeck (mkStdGen 1234) (faceDown player)))
-          xs -> pure (minimum [x | x <- (hand player), legalPlay x])
-      else
+          [] -> pure [head (shuffleDeck (mkStdGen 1234) (faceDown player))]
+          xs -> pure [minimum [x | x <- (hand player), legalPlay (Just $ head discardPile) x]]
+      else do
         -- they need to pickup then
         replenishCards player
-        pure (basicStrategy gameState)
-    xs -> let xs = [x | x <- (hand player), legalPlay x] in
+        pure []
+    xs -> let xs = [x | x <- (hand player), legalPlay (Just (head discardPile)) x] in
           pure (filter (== minimum xs) xs)
 
 gameLoopWithHistory :: State GameState String
 gameLoopWithHistory = do
-  ouputStats
+  --ouputStats
   applyStrategy
   currentIx <- gets currentIx
   players <- gets players
@@ -275,30 +320,30 @@ gameLoopWithHistory = do
                     else
                       currentIx + 1})
   -- calls game loop at the end unless there is a winner
-  if length (faceDown (players!!currentIx)) != 0 then
+  if length (faceDown (players!!currentIx)) /= 0 then
     gameLoop 
   else
-    pure
+    pure ""
 
 -- outputStats :: State GameState IO 
 -- outputStats = do
 --   putStrLn "Start Player" ++ "h"
 
 
-runOneGameWithHistory :: IO ()
-runOneGameWithHistory
+-- runOneGameWithHistory :: IO ()
+-- runOneGameWithHistory
 
---------------------------------------------------------------------------------
--- Step 4 
---------------------------------------------------------------------------------
-playOneGameStep4 :: [Extension] -> IO ()
-playOneGameStep4 xs
---------------------------------------------------------------------------------
--- Step 5 — Smart Player and Tournaments
---------------------------------------------------------------------------------
-smartStrategy :: State GameState Deck
-smartStrategy
+-- --------------------------------------------------------------------------------
+-- -- Step 4 
+-- --------------------------------------------------------------------------------
+-- playOneGameStep4 :: [Extension] -> IO ()
+-- playOneGameStep4 xs
+-- --------------------------------------------------------------------------------
+-- -- Step 5 — Smart Player and Tournaments
+-- --------------------------------------------------------------------------------
+-- smartStrategy :: State GameState Deck
+-- smartStrategy
 
-playTournament :: Int -> IO [(String, Int)]
-playTournament
+-- playTournament :: Int -> IO [(String, Int)]
+-- playTournament
 
