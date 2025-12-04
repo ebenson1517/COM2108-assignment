@@ -37,6 +37,7 @@ data Player = Player
   , hand      :: [Card]
   , faceUp    :: [Card]
   , faceDown  :: [Card]
+  , strategy  :: String
   } deriving (Show)
 
 -- Game state 
@@ -48,7 +49,7 @@ data GameState = GameState
   , burnedPiles   :: [Pile]
   , rng           :: StdGen      -- random number generator
   , finishedOrder :: [PlayerId]
-  , messages :: [String]
+  , messages      :: String
   } deriving (Show)
 
 
@@ -139,9 +140,14 @@ head' (x:_) = Just x
 applyStrategy :: State GameState ()
 applyStrategy = do
   -- select the cards, deal with consequences of it
-  result <- basicStrategy
   currentIx <- gets currentIx
   firstPlayers <- gets players
+
+  result <- case strategy $ firstPlayers!!currentIx of
+    "basic" -> basicStrategy
+    "basicSets" -> basicStrategySets
+    -- backup
+    _ -> basicStrategy
 
   if result == [] then
     giveWastePileTo $ firstPlayers!!currentIx
@@ -237,9 +243,9 @@ playOneGame = do
   let shuffledDeck = shuffleDeck gen deck
 
   -- create players
-  let initialPlayers = [ Player 0 name1 [] [] []
-                       , Player 1 name2 [] [] []
-                       , Player 2 name3 [] [] []
+  let initialPlayers = [ Player 0 name1 [] [] [] "basic"
+                       , Player 1 name2 [] [] [] "basic"
+                       , Player 2 name3 [] [] [] "basic"
                        ]
 
           
@@ -267,8 +273,7 @@ setupAndPlay = do
   dealToPlayer $ players!!2
   
   -- Choose starting player
-  startIdx <- chooseStartingPlayer
-  modify $ \gs -> gs { currentIx = startIdx }
+  chooseStartingPlayer
   
   -- Play the game
   gameLoop
@@ -299,20 +304,22 @@ dealToPlayer player = do
   
   dealCards 9
 
-chooseStartingPlayer :: State GameState Int
+chooseStartingPlayer :: State GameState ()
 chooseStartingPlayer = do
   findStartPlayer R3
 
-findStartPlayer :: Rank -> State GameState Int
+findStartPlayer :: Rank -> State GameState ()
 findStartPlayer n = do
   -- gets players, filters hand to number of rank n, sorts based on that number
   -- if first card is of right rank, then it will give them first turn
   players <- gets players
   let playersOrdRank = [(y, x) | x <- players, let y = length . filter (== n) . map rank $ hand x]
-  if (rank . head . hand . snd . head) playersOrdRank == n then
-    pure $ pId (snd (head playersOrdRank))
+  if (rank . head . hand . snd . head) playersOrdRank == n then do
+    modify $ \gs -> gs { currentIx = pId (snd (head playersOrdRank)) }
+    pure ()
   else
     findStartPlayer $ succ n
+
   
 
 --------------------------------------------------------------------------------
@@ -356,7 +363,7 @@ gameLoopWithHistory = do
       modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [pId (playerList!!currentIx)]}
       modify $ \x -> x {players = filter (\p -> pId p /= (pId $ playerList!!currentIx)) playerList}
       messages <- gets messages
-      modify $ \gs -> gs { messages = messages ++ ["player out"] ++ [show(playerList!!currentIx)]}
+      modify $ \gs -> gs { messages = messages ++ "player out" ++ show(playerList!!currentIx) ++ "\n"}
       players <- gets players
       modify (\x -> x {currentIx = if currentIx >= length players then 0 else currentIx})
       case players of
@@ -368,8 +375,8 @@ gameLoopWithHistory = do
           -- traceM $ "order: " ++ order
           pure $ order
         _ -> do
-          -- outputStats
-          gameLoop
+          outputStats
+          gameLoopWithHistory
   else do
     -- draw <- gets drawPile
     -- traceM $ "CurrentIx: " ++ show currentIx
@@ -381,35 +388,84 @@ gameLoopWithHistory = do
                       0
                     else
                       currentIx + 1})
-    -- outputStats
-    gameLoop
+    outputStats
+    gameLoopWithHistory
   
 
--- outputStats :: State GameState String
--- outputStats = do
---   -- start player
---   drawPile <- gets drawPile
---   players <- gets players
---   currentIx <- gets currentIx
---   case length drawPile of
---     (52 - (length players) * 9) -> do 
---       messages <- gets messages
---       modify $ \gs -> gs { messages = messages ++ "Start player: " ++show(players!!currentIx)}
---     _ -> pure ()
---   messages' <- gets messages
---   modify $ \gs -> gs { messages = messages' ++ "current player state: " ++ show(players!!currentIx)}
---   discard <- gets discardPile
---   messages'' <- gets messages
---   modify $ \gs -> gs { messages = messages'' ++ "current discard: " ++ show(discard) }
---   messages''' -> gets messages
---   case discard of 
---     [] -> modify $ \gx -> gs { messages = messages''' ++ "discard burned"}
---     _ -> pure ()
+outputStats :: State GameState ()
+outputStats = do
+  -- start player
+  drawPile <- gets drawPile
+  players <- gets players
+  currentIx <- gets currentIx
+  let drawSize = (52 - (length players) * 9)
+  case length drawPile of
+    drawSize -> do 
+      messages <- gets messages
+      modify $ \gs -> gs { messages = messages ++ "Start player: " ++ show(players!!currentIx) ++ "\n"}
+  messages' <- gets messages
+  modify $ \gs -> gs { messages = messages' ++ "current player state: " ++ show(players!!currentIx) ++ "\n"}
+  discard <- gets discardPile
+  messages'' <- gets messages
+  modify $ \gs -> gs { messages = messages'' ++ "current discard: " ++ show(discard)  ++ "\n"}
+  messages''' <- gets messages
+  case discard of 
+    [] -> modify $ \gs -> gs { messages = messages''' ++ "discard burned" ++ "\n"}
+    _ -> pure ()
   
 
--- runOneGameWithHistory :: IO ()
--- runOneGameWithHistory = do
+runOneGameWithHistory :: IO ()
+runOneGameWithHistory = do
+  -- get player names
+  putStrLn "Player 1 name: "
+  name1 <- getLine
+  
+  putStrLn "Player 2 name: "
+  name2 <- getLine
+  
+  putStrLn "Player 3 name: "
+  name3 <- getLine
 
+  -- create the deck
+  gen <- newStdGen
+  let deck = [Card r s | s <- [Clubs .. Spades], r <- [R2 .. RA]]
+  let shuffledDeck = shuffleDeck gen deck
+
+  -- create players
+  let initialPlayers = [ Player 0 name1 [] [] [] "basic"
+                       , Player 1 name2 [] [] [] "basic"
+                       , Player 2 name3 [] [] [] "basicSets"
+                       ]
+
+          
+
+  -- create gameState
+  let initialState = GameState { players = initialPlayers
+    , currentIx = 0
+    , drawPile = shuffledDeck
+    , discardPile = []
+    , burnedPiles = []
+    , rng = gen
+    , finishedOrder = []
+    , messages = []
+    }
+
+  let (result, finalState) = runState setupAndPlayWithHistory initialState
+  putStrLn $ messages finalState
+  putStrLn $ "Game over! Winner order: " ++ result
+
+setupAndPlayWithHistory :: State GameState String
+setupAndPlayWithHistory = do
+  players <- gets players
+  dealToPlayer $ players!!0
+  dealToPlayer $ players!!1
+  dealToPlayer $ players!!2
+  
+  -- Choose starting player
+  chooseStartingPlayer
+  
+  -- Play the game
+  gameLoopWithHistory
 
 -- --------------------------------------------------------------------------------
 -- -- Step 4 
