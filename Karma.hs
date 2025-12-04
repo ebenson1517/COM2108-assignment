@@ -11,7 +11,7 @@ import Debug.Trace
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Concurrent (threadDelay)
 import System.IO (hFlush, stdout)
-
+import Data.Maybe (fromMaybe)
 
 -- Cards
 data Suit = Clubs | Diamonds | Hearts | Spades
@@ -48,6 +48,7 @@ data GameState = GameState
   , burnedPiles   :: [Pile]
   , rng           :: StdGen      -- random number generator
   , finishedOrder :: [PlayerId]
+  , messages :: [String]
   } deriving (Show)
 
 
@@ -106,6 +107,7 @@ replenishCards player = do
   updatePlayer updatedPlayer
   modify $ \gs -> gs { drawPile = rest }
 
+
 shuffleDeck :: StdGen -> Deck -> Deck
 shuffleDeck gen deck = [x | (x, _) <- sortBy (comparing snd) (zip deck (randoms gen :: [Int]))]
 
@@ -116,42 +118,41 @@ shuffleDeck gen deck = [x | (x, _) <- sortBy (comparing snd) (zip deck (randoms 
 basicStrategy :: State GameState Deck
 basicStrategy = do
   players <- gets players
-  cId <- gets currentIx
+  currentIx <- gets currentIx
   discardPile <- gets discardPile
-  let player = players!!cId
-  -- if hand empty, check faceUp
-  -- if faceUp empty, check faceDown
+  let player = players!!currentIx
   case hand player of
     [] -> case faceUp player of
-            -- winner
-            [] -> pure  $ [head  $ faceDown player]
-            _ -> pure $ [minimum [x | x <- faceUp player, legalPlay (Just $ head discardPile) x]]
-    _ -> do
-      let card = [x | x <- hand player, legalPlay (Just $ head discardPile) x]
-      case card of 
-        -- if hand has no legal cards, pickup deck
-        [] -> pure []
-        _ -> pure $ [minimum card]
+            [] -> pure $ [head (faceDown player)]
+            _ -> case filter (legalPlay (head' discardPile)) (faceUp player) of
+                   [] -> pure []
+                   legal -> pure [minimum legal]
+    _ -> case filter (legalPlay (head' discardPile)) (hand player) of
+           [] -> pure []
+           legal -> pure [minimum legal]
+
+-- used to get the head of the discardPile for legalPlay checks
+head' :: [a] -> Maybe a
+head' [] = Nothing
+head' (x:_) = Just x
 
 applyStrategy :: State GameState ()
 applyStrategy = do
-  players <- gets players
-  discardPile <- gets discardPile
+  -- select the cards, deal with consequences of it
+  result <- basicStrategy
   currentIx <- gets currentIx
-  let player = players !! currentIx
-      legalCards = [c | c <- hand player, legalPlay (listToMaybe discardPile) c]
-  case legalCards of
-    [] -> giveWastePileTo player  -- no legal play, pick up cards
-    (card:_) -> do
-      let updatedPlayer = player { hand = filter (/= card) (hand player) }
-      updatePlayer updatedPlayer
-      modify $ \gs -> gs { discardPile = card : discardPile}
+  firstPlayers <- gets players
 
-      -- delete if 10
-      if discardPile /= [] && (rank (head discardPile) == R10) then
-        modify $ \gs -> gs { discardPile = [] }
-      else pure ()
+  if result == [] then
+    giveWastePileTo $ firstPlayers!!currentIx
+  else do
+    removeCard result
+    updatedPlayers <- gets players
+    replenishCards (updatedPlayers!!currentIx)
 
+  discardPile <- gets discardPile
+  modify $ \x -> x {discardPile = result ++ discardPile}
+  
   -- check after play effects
   -- https://stackoverflow.com/questions/59778472/guard-inside-do-block-haskell
   -- TODO might want to check all actions accounted for, need to add to burnedPiles
@@ -160,6 +161,18 @@ applyStrategy = do
              | checkTopFour discardPile = modify (\x -> x {discardPile = []})
              | otherwise = pure ()
   action
+
+-- removes card played from hand
+removeCard :: [Card] -> State GameState ()
+removeCard card = do
+  currentIx <- gets currentIx
+  players <- gets players
+  let player = players!!currentIx
+  let updatedPlayer = player {hand = filter (`notElem` card) (hand player),
+                              faceUp = filter (`notElem` card) (faceUp player),
+                              faceDown = filter (`notElem` card) (faceDown player)}
+  updatePlayer updatedPlayer
+
 
 checkTopFour :: Pile -> Bool
 checkTopFour discard
@@ -171,23 +184,39 @@ gameLoop :: State GameState String
 gameLoop = do
   applyStrategy
   currentIx <- gets currentIx
-  players <- gets players
-  finishedOrder <- gets finishedOrder
+  playerList <- gets players
+  ogFinishedOrder <- gets finishedOrder
   discard <- gets discardPile --TODO remove this line
-  modify (\x -> x {currentIx = if currentIx == (length players) - 1 then
+
+  -- figures out if there is a winner yet or not
+  if length (hand (playerList!!currentIx)) == 0 && 
+     length (faceUp (playerList!!currentIx)) == 0 && 
+     length (faceDown (playerList!!currentIx)) == 0 then do
+      modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [pId (playerList!!currentIx)]}
+      modify $ \x -> x {players = filter (\p -> pId p /= (pId $ playerList!!currentIx)) playerList}
+      players <- gets players
+      modify (\x -> x {currentIx = if currentIx >= length players then 0 else currentIx})
+      case players of
+        [x] -> do
+          finishedOrder <- gets finishedOrder
+          -- traceM $ "last player: " ++ show (map pId players)
+          -- traceM $ "finished order + last player: " ++ show(finishedOrder ++ (map pId players))
+          let order = show(finishedOrder ++ (map pId players))
+          -- traceM $ "order: " ++ order
+          pure $ order
+        _ -> do
+          gameLoop
+  else do
+    -- draw <- gets drawPile
+    -- traceM $ "CurrentIx: " ++ show currentIx
+    -- traceM $ "Player hands: " ++ show (map (length . hand) playerList)
+    -- traceM $ "Discard pile size: " ++ show (length discard)
+    -- traceM $ "Discard pile top: " ++ show(head' discard)
+    -- traceM $ "Draw pile size: " ++ show (length draw)
+    modify (\x -> x {currentIx = if currentIx == (length playerList) - 1 then
                       0
                     else
                       currentIx + 1})
-  -- calls game loop at the end unless there is a winner
-  if length (hand (players!!currentIx)) == 0 && 
-     length (faceUp (players!!currentIx)) == 0 && 
-     length (faceDown (players!!currentIx)) == 0 then do
-    modify $ \x -> x {finishedOrder = finishedOrder ++ [pId (players!!currentIx)]}
-    pure "winner"
-  else do
-    -- traceM $ "CurrentIx: " ++ show currentIx
-    -- traceM $ "Player hands: " ++ show (map (length . hand) players)
-    -- traceM $ "Discard pile size: " ++ show (length discard)
     gameLoop
 
 playOneGame :: IO ()
@@ -223,10 +252,11 @@ playOneGame = do
     , burnedPiles = []
     , rng = gen
     , finishedOrder = []
+    , messages = []
     }
 
-  let finalState = execState setupAndPlay initialState
-  putStrLn $ "Game over! Winner: " ++ show (finishedOrder finalState)
+  let (result, finalState) = runState setupAndPlay initialState
+  putStrLn $ "Game over! Winner order: " ++ result
 
 
 setupAndPlay :: State GameState String
@@ -309,29 +339,77 @@ basicStrategySets = do
     xs -> let xs = [x | x <- (hand player), legalPlay (Just (head discardPile)) x] in
           pure (filter (== minimum xs) xs)
 
+-- TODO 100% not sure that this is implemented correctly
 gameLoopWithHistory :: State GameState String
 gameLoopWithHistory = do
-  --ouputStats
+  -- should print it at the end of the game
   applyStrategy
   currentIx <- gets currentIx
-  players <- gets players
-  modify (\x -> x {currentIx = if currentIx == (length players) then
+  playerList <- gets players
+  ogFinishedOrder <- gets finishedOrder
+  discard <- gets discardPile --TODO remove this line
+
+  -- figures out if there is a winner yet or not
+  if length (hand (playerList!!currentIx)) == 0 && 
+     length (faceUp (playerList!!currentIx)) == 0 && 
+     length (faceDown (playerList!!currentIx)) == 0 then do
+      modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [pId (playerList!!currentIx)]}
+      modify $ \x -> x {players = filter (\p -> pId p /= (pId $ playerList!!currentIx)) playerList}
+      messages <- gets messages
+      modify $ \gs -> gs { messages = messages ++ ["player out"] ++ [show(playerList!!currentIx)]}
+      players <- gets players
+      modify (\x -> x {currentIx = if currentIx >= length players then 0 else currentIx})
+      case players of
+        [x] -> do
+          finishedOrder <- gets finishedOrder
+          -- traceM $ "last player: " ++ show (map pId players)
+          -- traceM $ "finished order + last player: " ++ show(finishedOrder ++ (map pId players))
+          let order = show(finishedOrder ++ (map pId players))
+          -- traceM $ "order: " ++ order
+          pure $ order
+        _ -> do
+          -- outputStats
+          gameLoop
+  else do
+    -- draw <- gets drawPile
+    -- traceM $ "CurrentIx: " ++ show currentIx
+    -- traceM $ "Player hands: " ++ show (map (length . hand) playerList)
+    -- traceM $ "Discard pile size: " ++ show (length discard)
+    -- traceM $ "Discard pile top: " ++ show(head' discard)
+    -- traceM $ "Draw pile size: " ++ show (length draw)
+    modify (\x -> x {currentIx = if currentIx == (length playerList) - 1 then
                       0
                     else
                       currentIx + 1})
-  -- calls game loop at the end unless there is a winner
-  if length (faceDown (players!!currentIx)) /= 0 then
-    gameLoop 
-  else
-    pure ""
+    -- outputStats
+    gameLoop
+  
 
--- outputStats :: State GameState IO 
+-- outputStats :: State GameState String
 -- outputStats = do
---   putStrLn "Start Player" ++ "h"
-
+--   -- start player
+--   drawPile <- gets drawPile
+--   players <- gets players
+--   currentIx <- gets currentIx
+--   case length drawPile of
+--     (52 - (length players) * 9) -> do 
+--       messages <- gets messages
+--       modify $ \gs -> gs { messages = messages ++ "Start player: " ++show(players!!currentIx)}
+--     _ -> pure ()
+--   messages' <- gets messages
+--   modify $ \gs -> gs { messages = messages' ++ "current player state: " ++ show(players!!currentIx)}
+--   discard <- gets discardPile
+--   messages'' <- gets messages
+--   modify $ \gs -> gs { messages = messages'' ++ "current discard: " ++ show(discard) }
+--   messages''' -> gets messages
+--   case discard of 
+--     [] -> modify $ \gx -> gs { messages = messages''' ++ "discard burned"}
+--     _ -> pure ()
+  
 
 -- runOneGameWithHistory :: IO ()
--- runOneGameWithHistory
+-- runOneGameWithHistory = do
+
 
 -- --------------------------------------------------------------------------------
 -- -- Step 4 
