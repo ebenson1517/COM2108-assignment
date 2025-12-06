@@ -50,6 +50,10 @@ data GameState = GameState
   , rng           :: StdGen      -- random number generator
   , finishedOrder :: [PlayerId]
   , messages      :: String
+  , order         :: Bool
+  , nines         :: Bool  -- rule extensions
+  , threes        :: Bool
+  , eights        :: Bool
   } deriving (Show)
 
 
@@ -69,6 +73,7 @@ legalPlay (Just (Card pileRank _)) (Card cardRank _)
   | cardRank == R2 || cardRank == R8 || cardRank == R10 = True
   | cardRank >= pileRank = True
   | pileRank == R7 && cardRank <= pileRank = True
+  | pileRank == R8 = True
   | otherwise = False
 
 validPlays :: Maybe Card -> Deck -> Deck
@@ -162,11 +167,17 @@ applyStrategy = do
   -- check after play effects
   -- https://stackoverflow.com/questions/59778472/guard-inside-do-block-haskell
   -- TODO might want to check all actions accounted for, need to add to burnedPiles
-  
+  -- nines need to be outside
   let action | discardPile /= [] && rank (head discardPile) == R10 = modify (\x -> x {discardPile = []})
              | checkTopFour discardPile = modify (\x -> x {discardPile = []})
+             | discardPile /= [] && rank (head discardPile) == R8 = do
+                                                                        order <- gets order
+                                                                        modify $ \gs -> gs { order = not order}
+             | checkTopThree discardPile = modify $ \gs -> gs {discardPile = []} 
+             | discardPile /= [] && rank (head discardPile) == R9 = stealCard
              | otherwise = pure ()
   action
+  
 
 -- removes card played from hand
 removeCard :: [Card] -> State GameState ()
@@ -179,7 +190,35 @@ removeCard card = do
                               faceDown = filter (`notElem` card) (faceDown player)}
   updatePlayer updatedPlayer
 
+-- steals card from next player
+stealCard :: State GameState ()
+stealCard = do
+  currentIx <- gets currentIx
+  players <- gets players
+  gs <- get
+  case hand $ players!!(nextPlayer gs) of
+    [] -> pure ()
+    _ -> do gen <- gets rng
+            let player = players!!currentIx
+                updatedPlayer = player {hand = hand player ++ (shuffleDeck gen (hand $ players!!(nextPlayer gs))) }
+            updatePlayer updatedPlayer
 
+-- returns index of the next player
+-- does not modify, as used for seeing the next player as well
+nextPlayer :: GameState -> Int
+nextPlayer gs = 
+  let current = currentIx gs
+      playersList = players gs
+  in if current == (length playersList) - 1 
+       then 0
+       else current + 1
+  
+-- checks if top three cards are threes
+checkTopThree :: Pile -> Bool
+checkTopThree (c1:c2:c3:_) = rank c1 == R3 && rank c2 == R3 && rank c3 == R3
+checkTopThree _             = False
+
+-- checks if top four cards are the same
 checkTopFour :: Pile -> Bool
 checkTopFour discard
   | length discard >= 4 = rank (discard!!0) == rank (discard!!1) && rank (discard!!1) == rank (discard!!2) && rank (discard!!2) == rank (discard!!3)
@@ -219,10 +258,8 @@ gameLoop = do
     -- traceM $ "Discard pile size: " ++ show (length discard)
     -- traceM $ "Discard pile top: " ++ show(head' discard)
     -- traceM $ "Draw pile size: " ++ show (length draw)
-    modify (\x -> x {currentIx = if currentIx == (length playerList) - 1 then
-                      0
-                    else
-                      currentIx + 1})
+    gs <- get
+    modify (\x -> x {currentIx = nextPlayer gs })
     gameLoop
 
 playOneGame :: IO ()
@@ -278,10 +315,6 @@ setupAndPlay = do
   -- Play the game
   gameLoop
 
-
-  
-
-
 -- Works correctly
 dealToPlayer :: Player -> State GameState Deck
 dealToPlayer player = do
@@ -313,12 +346,15 @@ findStartPlayer n = do
   -- gets players, filters hand to number of rank n, sorts based on that number
   -- if first card is of right rank, then it will give them first turn
   players <- gets players
-  let playersOrdRank = [(y, x) | x <- players, let y = length . filter (== n) . map rank $ hand x]
-  if (rank . head . hand . snd . head) playersOrdRank == n then do
-    modify $ \gs -> gs { currentIx = pId (snd (head playersOrdRank)) }
-    pure ()
-  else
-    findStartPlayer $ succ n
+  let playersOrdRank = [(y, x) | x <- players, let y = length . filter (== n) . map rank $ hand x, y > 0]
+  case playersOrdRank of
+    [] -> findStartPlayer $ succ n
+    _ -> do
+          if (rank . head . hand . snd . head) playersOrdRank == n then do
+            modify $ \gs -> gs { currentIx = pId (snd (head playersOrdRank)) }
+            pure ()
+          else
+            findStartPlayer $ succ n
 
   
 
@@ -327,24 +363,20 @@ findStartPlayer n = do
 --------------------------------------------------------------------------------
 basicStrategySets:: State GameState Deck
 basicStrategySets = do
--- easiest thing to do is just to sort the hand according to rank each time
   players <- gets players
   currentIx <- gets currentIx
-  let player = players!!currentIx
   discardPile <- gets discardPile
+  let player = players!!currentIx
   case hand player of
-    [] -> do
-      drawPile <- gets drawPile
-      if drawPile == [] then
-        case faceUp player of
-          [] -> pure [head (shuffleDeck (mkStdGen 1234) (faceDown player))]
-          xs -> pure [minimum [x | x <- (hand player), legalPlay (Just $ head discardPile) x]]
-      else do
-        -- they need to pickup then
-        replenishCards player
-        pure []
-    xs -> let xs = [x | x <- (hand player), legalPlay (Just (head discardPile)) x] in
-          pure (filter (== minimum xs) xs)
+    [] -> case faceUp player of
+            [] -> pure $ [head (faceDown player)]
+            _ -> case filter (legalPlay (head' discardPile)) (faceUp player) of
+                   [] -> pure []
+                   legal -> pure [minimum legal]
+    _ -> case filter (legalPlay (head' discardPile)) (hand player) of
+           [] -> pure []
+           legal -> let minRank = rank (minimum legal)
+                    in pure [x | x <- legal, rank x == minRank]
 
 -- TODO 100% not sure that this is implemented correctly
 gameLoopWithHistory :: State GameState String
@@ -470,8 +502,50 @@ setupAndPlayWithHistory = do
 -- --------------------------------------------------------------------------------
 -- -- Step 4 
 -- --------------------------------------------------------------------------------
--- playOneGameStep4 :: [Extension] -> IO ()
--- playOneGameStep4 xs
+playOneGameStep4 :: [Extension] -> IO ()
+playOneGameStep4 xs = do
+  -- get player names
+  putStrLn "Player 1 name: "
+  name1 <- getLine
+  putStrLn "Player 2 name: "
+  name2 <- getLine
+  putStrLn "Player 3 name: "
+  name3 <- getLine
+  -- create the deck
+  gen <- newStdGen
+  let deck = [Card r s | s <- [Clubs .. Spades], r <- [R2 .. RA]]
+  let shuffledDeck = shuffleDeck gen deck
+  -- create players
+  let initialPlayers = [ Player 0 name1 [] [] [] "basic"
+                       , Player 1 name2 [] [] [] "basic"
+                       , Player 2 name3 [] [] [] "basicSets"
+                       ]
+  -- create gameState
+  let baseState = GameState { players = initialPlayers
+      , currentIx = 0
+      , drawPile = shuffledDeck
+      , discardPile = []
+      , burnedPiles = []
+      , rng = gen
+      , finishedOrder = []
+      , messages = []
+      , order = True
+      , nines = False
+      , threes = False
+      , eights = False
+      }
+      modifiedState = if elem ExtReverse8 xs
+                      then baseState { eights = True }
+                      else baseState
+      modifiedState' = if elem ExtThree3s xs
+                       then modifiedState { threes = True }
+                       else modifiedState
+      modifiedState'' = if elem ExtNineClubs xs
+                        then modifiedState' { nines = True }
+                        else modifiedState'
+      (result, finalState) = runState setupAndPlayWithHistory modifiedState''
+  putStrLn $ messages finalState
+  putStrLn $ "Game over! Winner order: " ++ result
 -- --------------------------------------------------------------------------------
 -- -- Step 5 — Smart Player and Tournaments
 -- --------------------------------------------------------------------------------
