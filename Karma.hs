@@ -48,7 +48,7 @@ data GameState = GameState
   , discardPile   :: Pile
   , burnedPiles   :: [Pile]
   , rng           :: StdGen      -- random number generator
-  , finishedOrder :: [PlayerId]
+  , finishedOrder :: [Player]
   , messages      :: String
   , order         :: Bool
   , nines         :: Bool  -- rule extensions
@@ -64,23 +64,23 @@ data Extension = ExtReverse8 | ExtThree3s | ExtNineClubs
 --------------------------------------------------------------------------------
 -- Step 1 
 --------------------------------------------------------------------------------
-legalPlay :: Maybe Card -> Card -> Bool
 -- Determines if legal play. Legal if discard pile empty, or higher than top of
 -- discard. If 7, go below instead. If 2, always legal. If 8, ignore 8. If 10,
 -- remove discard.
+legalPlay :: Maybe Card -> Card -> Bool
 legalPlay Nothing _ = True
 legalPlay (Just (Card pileRank _)) (Card cardRank _)
   | cardRank == R2 || cardRank == R8 || cardRank == R10 = True
   | cardRank >= pileRank = True
   | pileRank == R7 && cardRank <= pileRank = True
-  | pileRank == R8 = True
   | otherwise = False
 
+-- Returns a list of the legal cards to play on top of a card
 validPlays :: Maybe Card -> Deck -> Deck
 validPlays pile deck = [x | x <- deck, legalPlay pile x]
 
+-- removes the top n cards from the drawPile
 dealCards :: Int -> State GameState Deck
--- We take in BOTH Int and GameState, it takes in the gamestate and returns the new deck (gross why is it like this)
 dealCards 0 = pure []
 dealCards n = do
   drawPile <- gets drawPile
@@ -91,7 +91,7 @@ dealCards n = do
       rest <- dealCards (n-1)
       pure (card:rest)
 
-
+-- gives the wastePile to the player, sets the discardPile to empty
 giveWastePileTo :: Player -> State GameState ()
 giveWastePileTo player = do
   discard <- gets discardPile
@@ -99,10 +99,13 @@ giveWastePileTo player = do
   updatePlayer updatedPlayer
   modify $ \gs -> gs { discardPile = [] }
 
+-- searches through the player list for the player with the same pId as the one passed in
+-- and replaces it
 updatePlayer :: Player -> State GameState ()
 updatePlayer updatedPlayer = modify $ \gs ->
   gs { players = map (\p -> if pId p == pId updatedPlayer then updatedPlayer else p) (players gs) }
 
+-- adds cards to a players hand until they have three cards again
 replenishCards :: Player -> State GameState ()
 replenishCards player = do
   draw <- gets drawPile
@@ -113,7 +116,7 @@ replenishCards player = do
   updatePlayer updatedPlayer
   modify $ \gs -> gs { drawPile = rest }
 
-
+-- shuffles a deck passed in
 shuffleDeck :: StdGen -> Deck -> Deck
 shuffleDeck gen deck = [x | (x, _) <- sortBy (comparing snd) (zip deck (randoms gen :: [Int]))]
 
@@ -121,6 +124,7 @@ shuffleDeck gen deck = [x | (x, _) <- sortBy (comparing snd) (zip deck (randoms 
 -- Step 2 
 --------------------------------------------------------------------------------
 -- Selects smallest legal card, returns it
+-- checks hand first, then faceUp, then faceDown
 basicStrategy :: State GameState Deck
 basicStrategy = do
   players <- gets players
@@ -130,32 +134,37 @@ basicStrategy = do
   case hand player of
     [] -> case faceUp player of
             [] -> pure $ [head (faceDown player)]
-            _ -> case filter (legalPlay (head' discardPile)) (faceUp player) of
+            _ -> case validPlays (head' discardPile) (faceUp player) of
                    [] -> pure []
                    legal -> pure [minimum legal]
-    _ -> case filter (legalPlay (head' discardPile)) (hand player) of
+    _ -> case validPlays (head' discardPile) (hand player) of
            [] -> pure []
            legal -> pure [minimum legal]
 
--- used to get the head of the discardPile for legalPlay checks
+-- gets head of discardPile, but checks that it isn't empty
 head' :: [a] -> Maybe a
 head' [] = Nothing
 head' (x:_) = Just x
 
+-- executes a player's turn
+-- applies their strategy
+-- applies any rules that come from the card they played
 applyStrategy :: State GameState ()
 applyStrategy = do
   -- select the cards, deal with consequences of it
   currentIx <- gets currentIx
-  firstPlayers <- gets players
+  players' <- gets players
 
-  result <- case strategy $ firstPlayers!!currentIx of
+  result <- case strategy $ players'!!currentIx of
     "basic" -> basicStrategy
     "basicSets" -> basicStrategySets
+    "smart" -> smartStrategy
+                  
     -- backup
     _ -> basicStrategy
 
   if result == [] then
-    giveWastePileTo $ firstPlayers!!currentIx
+    giveWastePileTo $ players'!!currentIx
   else do
     removeCard result
     updatedPlayers <- gets players
@@ -168,18 +177,20 @@ applyStrategy = do
   -- https://stackoverflow.com/questions/59778472/guard-inside-do-block-haskell
   -- TODO might want to check all actions accounted for, need to add to burnedPiles
   -- nines need to be outside
+  if discardPile /= [] && rank (head discardPile) == R9 then
+    stealCard
+  else pure ()
   let action | discardPile /= [] && rank (head discardPile) == R10 = modify (\x -> x {discardPile = []})
              | checkTopFour discardPile = modify (\x -> x {discardPile = []})
              | discardPile /= [] && rank (head discardPile) == R8 = do
                                                                         order <- gets order
                                                                         modify $ \gs -> gs { order = not order}
              | checkTopThree discardPile = modify $ \gs -> gs {discardPile = []} 
-             | discardPile /= [] && rank (head discardPile) == R9 = stealCard
              | otherwise = pure ()
   action
   
 
--- removes card played from hand
+-- removes card played from a player
 removeCard :: [Card] -> State GameState ()
 removeCard card = do
   currentIx <- gets currentIx
@@ -190,7 +201,7 @@ removeCard card = do
                               faceDown = filter (`notElem` card) (faceDown player)}
   updatePlayer updatedPlayer
 
--- steals card from next player
+-- steals card from next player, if their hand isn't empty
 stealCard :: State GameState ()
 stealCard = do
   currentIx <- gets currentIx
@@ -203,15 +214,17 @@ stealCard = do
                 updatedPlayer = player {hand = hand player ++ (shuffleDeck gen (hand $ players!!(nextPlayer gs))) }
             updatePlayer updatedPlayer
 
--- returns index of the next player
--- does not modify, as used for seeing the next player as well
+-- returns index of the next player in turn
 nextPlayer :: GameState -> Int
 nextPlayer gs = 
   let current = currentIx gs
       playersList = players gs
-  in if current == (length playersList) - 1 
-       then 0
-       else current + 1
+      len = length playersList
+  in if order gs 
+     then 
+      if current == len - 1 then 0 else current + 1
+     else 
+      if current == 0 then len - 1 else current - 1
   
 -- checks if top three cards are threes
 checkTopThree :: Pile -> Bool
@@ -224,7 +237,10 @@ checkTopFour discard
   | length discard >= 4 = rank (discard!!0) == rank (discard!!1) && rank (discard!!1) == rank (discard!!2) && rank (discard!!2) == rank (discard!!3)
   | otherwise = False
 
--- TODO 100% not sure that this is implemented correctly
+-- game Loop, executes a full turn
+-- applies strategy, decides if the player has one yet
+-- checks if end of game
+-- otherwise calls again
 gameLoop :: State GameState String
 gameLoop = do
   applyStrategy
@@ -237,7 +253,7 @@ gameLoop = do
   if length (hand (playerList!!currentIx)) == 0 && 
      length (faceUp (playerList!!currentIx)) == 0 && 
      length (faceDown (playerList!!currentIx)) == 0 then do
-      modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [pId (playerList!!currentIx)]}
+      modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [playerList!!currentIx]}
       modify $ \x -> x {players = filter (\p -> pId p /= (pId $ playerList!!currentIx)) playerList}
       players <- gets players
       modify (\x -> x {currentIx = if currentIx >= length players then 0 else currentIx})
@@ -246,7 +262,7 @@ gameLoop = do
           finishedOrder <- gets finishedOrder
           -- traceM $ "last player: " ++ show (map pId players)
           -- traceM $ "finished order + last player: " ++ show(finishedOrder ++ (map pId players))
-          let order = show(finishedOrder ++ (map pId players))
+          let order = show(finishedOrder ++ players)
           -- traceM $ "order: " ++ order
           pure $ order
         _ -> do
@@ -262,6 +278,7 @@ gameLoop = do
     modify (\x -> x {currentIx = nextPlayer gs })
     gameLoop
 
+-- sets up a game with three players and plays one, outputs the result
 playOneGame :: IO ()
 playOneGame = do
   -- get player names
@@ -296,18 +313,20 @@ playOneGame = do
     , rng = gen
     , finishedOrder = []
     , messages = []
+    , order = True
+    , nines = False
+    , threes = False
+    , eights = False
     }
 
   let (result, finalState) = runState setupAndPlay initialState
   putStrLn $ "Game over! Winner order: " ++ result
 
-
+-- deals to players, chooses the starting player, starts the gameLoop
 setupAndPlay :: State GameState String
 setupAndPlay = do
   players <- gets players
-  dealToPlayer $ players!!0
-  dealToPlayer $ players!!1
-  dealToPlayer $ players!!2
+  mapM dealToPlayer players
   
   -- Choose starting player
   chooseStartingPlayer
@@ -315,7 +334,7 @@ setupAndPlay = do
   -- Play the game
   gameLoop
 
--- Works correctly
+-- deals cards to players, at the start of the game
 dealToPlayer :: Player -> State GameState Deck
 dealToPlayer player = do
   drawPile <- gets drawPile
@@ -330,17 +349,18 @@ dealToPlayer player = do
                              , faceDown = drawnCards3
                              }
   
-  modify (\x -> x { players = map (\p -> if pId p == pId player 
-                                           then updatedPlayer 
-                                           else p) 
-                                    (players x) })
+  updatePlayer updatedPlayer
   
   dealCards 9
 
+-- chooses the starting player, based on who has the most of the lowest cards
 chooseStartingPlayer :: State GameState ()
 chooseStartingPlayer = do
   findStartPlayer R3
 
+-- recursively checks cards, sorts the players by who has the most of a rank,
+-- if none have the rank, moves to the next rank. Otherwise will return the player
+-- with the most
 findStartPlayer :: Rank -> State GameState ()
 findStartPlayer n = do
   -- gets players, filters hand to number of rank n, sorts based on that number
@@ -361,6 +381,8 @@ findStartPlayer n = do
 --------------------------------------------------------------------------------
 -- Step 3 
 --------------------------------------------------------------------------------
+-- gets the smallest legal card, but returns all cards of that rank
+-- checks hand first, then faceUp, then faceDown
 basicStrategySets:: State GameState Deck
 basicStrategySets = do
   players <- gets players
@@ -378,7 +400,11 @@ basicStrategySets = do
            legal -> let minRank = rank (minimum legal)
                     in pure [x | x <- legal, rank x == minRank]
 
--- TODO 100% not sure that this is implemented correctly
+-- game Loop, executes a full turn
+-- applies strategy, decides if the player has one yet
+-- checks if end of game
+-- otherwise calls again
+-- updates the gameState with messges to be output at end of the game
 gameLoopWithHistory :: State GameState String
 gameLoopWithHistory = do
   -- should print it at the end of the game
@@ -392,7 +418,7 @@ gameLoopWithHistory = do
   if length (hand (playerList!!currentIx)) == 0 && 
      length (faceUp (playerList!!currentIx)) == 0 && 
      length (faceDown (playerList!!currentIx)) == 0 then do
-      modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [pId (playerList!!currentIx)]}
+      modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [playerList!!currentIx]}
       modify $ \x -> x {players = filter (\p -> pId p /= (pId $ playerList!!currentIx)) playerList}
       messages <- gets messages
       modify $ \gs -> gs { messages = messages ++ "player out" ++ show(playerList!!currentIx) ++ "\n"}
@@ -403,7 +429,7 @@ gameLoopWithHistory = do
           finishedOrder <- gets finishedOrder
           -- traceM $ "last player: " ++ show (map pId players)
           -- traceM $ "finished order + last player: " ++ show(finishedOrder ++ (map pId players))
-          let order = show(finishedOrder ++ (map pId players))
+          let order = show(finishedOrder ++ players)
           -- traceM $ "order: " ++ order
           pure $ order
         _ -> do
@@ -423,7 +449,7 @@ gameLoopWithHistory = do
     outputStats
     gameLoopWithHistory
   
-
+-- during gameLoop, this records stats, and adds it to messages in the gameState
 outputStats :: State GameState ()
 outputStats = do
   -- start player
@@ -445,7 +471,8 @@ outputStats = do
     [] -> modify $ \gs -> gs { messages = messages''' ++ "discard burned" ++ "\n"}
     _ -> pure ()
   
-
+-- setup and runs a game, using gameLoopWithHistory.
+-- outputs the messages in gameState at the end
 runOneGameWithHistory :: IO ()
 runOneGameWithHistory = do
   -- get player names
@@ -480,18 +507,21 @@ runOneGameWithHistory = do
     , rng = gen
     , finishedOrder = []
     , messages = []
+    , order = True
+    , nines = False
+    , threes = False
+    , eights = False
     }
 
   let (result, finalState) = runState setupAndPlayWithHistory initialState
   putStrLn $ messages finalState
   putStrLn $ "Game over! Winner order: " ++ result
 
+-- deals to players, starts the game
 setupAndPlayWithHistory :: State GameState String
 setupAndPlayWithHistory = do
   players <- gets players
-  dealToPlayer $ players!!0
-  dealToPlayer $ players!!1
-  dealToPlayer $ players!!2
+  mapM dealToPlayer players
   
   -- Choose starting player
   chooseStartingPlayer
@@ -502,6 +532,8 @@ setupAndPlayWithHistory = do
 -- --------------------------------------------------------------------------------
 -- -- Step 4 
 -- --------------------------------------------------------------------------------
+-- plays a game, takes in list of extensions to use
+-- sets the fields in gameState to the true if extensions are active
 playOneGameStep4 :: [Extension] -> IO ()
 playOneGameStep4 xs = do
   -- get player names
@@ -549,9 +581,141 @@ playOneGameStep4 xs = do
 -- --------------------------------------------------------------------------------
 -- -- Step 5 — Smart Player and Tournaments
 -- --------------------------------------------------------------------------------
--- smartStrategy :: State GameState Deck
--- smartStrategy
+smartStrategy :: State GameState Deck
+smartStrategy = do
+  -- starts by finding the lowest card to play
+  -- 2s, 10s and aces are the best now, so save them
+  -- only play them one at a time
+  -- unless the discard pile is empty
+  -- then play them all at the same time
+  players <- gets players
+  currentIx <- gets currentIx
+  discardPile <- gets discardPile
+  let player = players!!currentIx
+      topCard = case discardPile of
+                  [] -> Nothing
+                  (x:y:_) -> case rank x of
+                              R8 -> Just y
+                              _ -> Just x
+                  (x:_) -> case rank x of
+                            R8 -> Nothing
+                            _ -> Just x
+      cards = case chooseFromWhere player of
+                "FACE_DOWN" -> faceDown player
+                "FACE_UP"   -> faceUp player
+                "HAND"      -> hand player
+                _           -> []
+  
+  pure $ chooseBestCard topCard cards
+      
 
--- playTournament :: Int -> IO [(String, Int)]
--- playTournament
+-- decides where to get the cards from, hand, faceUp or faceDown
+chooseFromWhere :: Player -> String
+chooseFromWhere player = 
+  case hand player of
+    [] -> case faceUp player of
+            [] -> "FACE_DOWN"
+            _  -> "FACE_UP"
+    _ -> "HAND"
+
+-- if player is close to winning, then be aggressive
+-- if can clear, and big discard pile, then clear (safety)
+chooseBestCard :: Maybe Card -> [Card] -> [Card]
+chooseBestCard discardPile cards = 
+  let ordCards = sortBy (comparing (rankValue .  rank)) cards
+      legal = validPlays discardPile ordCards
+  in
+    if null legal then
+      []
+    else
+      let minRank = rank (head legal)
+      in
+        case discardPile of
+        Nothing -> [x | x <- legal, rank x == minRank]
+        _ -> case minRank of
+              R2 -> case legal of
+                      [x] -> [x]
+                      _ -> chooseBestCard discardPile [x | x <- legal, rank x /= R2]
+              R10 -> case legal of
+                      [x] -> [x] 
+                      _ -> chooseBestCard discardPile [x | x <- legal, rank x /= R10]
+              _ -> [x | x <- legal, rank x == minRank]
+
+-- allows me to customise the ranks of cards
+-- so special cards are better
+-- uses pattern matching
+rankValue :: Rank -> Int
+rankValue R2 = 100
+rankValue R10 = 99
+rankValue RA = 12
+rankValue RK = 11
+rankValue RQ = 10
+rankValue RJ = 9
+rankValue R9 = 8
+rankValue R8 = 7
+rankValue R7 = 6
+rankValue R6 = 5
+rankValue R5 = 4
+rankValue R4 = 3
+rankValue R3 = 2
+
+-- runs n games, tallies results up, outputs them
+playTournament :: Int -> IO [(String, Int)]
+playTournament nGames = do
+  results <- runTournament nGames
+  let unique = nub results
+      talliedResults = [(x, tally results x) | x <- unique]
+  pure talliedResults
+
+-- runs the tournament, by recursively playing the games,
+-- and returning the result
+runTournament :: Int -> IO [String]
+runTournament 0 = pure []
+runTournament nGames = do
+  result <- playOneGameTourney [ExtReverse8, ExtThree3s, ExtNineClubs]
+  rest <- runTournament (nGames - 1)
+  pure (result ++ rest)
+
+-- tallies the number of times something appears in a list
+tally :: [String] -> String -> Int
+tally xs x = length [y | y <- xs, y == x]
+
+-- plays a single game in the tournament
+playOneGameTourney :: [Extension] -> IO [String]
+playOneGameTourney xs = do
+  -- create the deck
+  gen <- newStdGen
+  let deck = [Card r s | s <- [Clubs .. Spades], r <- [R2 .. RA]]
+  let shuffledDeck = shuffleDeck gen deck
+  -- create players
+  let initialPlayers = [ Player 0 "p1" [] [] [] "basic"
+                       , Player 1 "p2" [] [] [] "basicSets"
+                       , Player 2 "p3" [] [] [] "smart"
+                       ]
+  -- create gameState
+  let baseState = GameState { players = initialPlayers
+      , currentIx = 0
+      , drawPile = shuffledDeck
+      , discardPile = []
+      , burnedPiles = []
+      , rng = gen
+      , finishedOrder = []
+      , messages = []
+      , order = True
+      , nines = False
+      , threes = False
+      , eights = False
+      }
+      modifiedState = if elem ExtReverse8 xs
+                      then baseState { eights = True }
+                      else baseState
+      modifiedState' = if elem ExtThree3s xs
+                       then modifiedState { threes = True }
+                       else modifiedState
+      modifiedState'' = if elem ExtNineClubs xs
+                        then modifiedState' { nines = True }
+                        else modifiedState'
+      (result, finalState) = runState setupAndPlayWithHistory modifiedState''
+  
+  pure [strategy $ head $ finishedOrder finalState]
 
