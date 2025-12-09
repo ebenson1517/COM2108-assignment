@@ -190,9 +190,10 @@ applyStrategy = do
   -- nines need to be outside
   nines <- gets nines
   eights <- gets eights
+  burnedPiles <- gets burnedPiles
   when (nines && discard' /= [] && rank (head discard') == R9) stealCard
-  let action | discard' /= [] && rank (head discard') == R10 = do modify (\x -> x {discardPile = []})
-             | checkTopFour discard' = modify (\x -> x {discardPile = []})
+  let action | discard' /= [] && rank (head discard') == R10 = do modify (\x -> x {discardPile = [], burnedPiles = burnedPiles ++ [discard']})
+             | checkTopFour discard' = modify (\x -> x {discardPile = [], burnedPiles = burnedPiles ++ [discard'] })
              | eights && discard' /= [] && rank (head discard') == R8 = do
                                                                         order <- gets order
                                                                         modify $ \gs -> gs { order = not order}
@@ -604,9 +605,13 @@ smartStrategy = do
                 "FACE_UP"   -> faceUp player
                 "HAND"      -> hand player
                 _           -> []
+  
+  -- things to implement: keep track of highest card avaliable
+  -- if it is two below the highest card available, play one at a time
+  -- if next player is about to win/finish hand, play high card
+  -- if discardPile is big, then play second third highest card (unless given opportunity to play 5 or lower)
 
   pure $ chooseBestCard topCard cards
-
 
 -- decides where to get the cards from, hand, faceUp or faceDown
 chooseFromWhere :: Player -> String
@@ -623,6 +628,8 @@ chooseBestCard :: Maybe Card -> [Card] -> [Card]
 chooseBestCard discardPile cards =
   let ordCards = sortBy (comparing (rankValue .  rank)) cards
       legal = validPlays discardPile ordCards
+      highestRank = findHighestCard RA
+      sndHighestRank = pred <$> highestRank
   in
     if null legal then
       []
@@ -638,7 +645,29 @@ chooseBestCard discardPile cards =
               R10 -> case legal of
                       [x] -> [x]
                       _ -> chooseBestCard discardPile [x | x <- legal, rank x /= R10]
+              
+              x | x == highestRank -> pure $ head $ filter (\x -> rank x == minRank) cards
+              x | x == sndHighestRank -> pure $ head $ filter (\x -> rank x == minRank) cards
               _ -> [x | x <- legal, rank x == minRank]
+
+-- searches through the burnedPiles and discardPile,
+-- checks if the rank passed in has been completely used
+-- returns the highest rank
+findHighestCard :: Rank -> State GameState Rank
+findHighestCard r = do
+  burnedPiles <- gets burnedPiles
+  discardPile <- gets discardPile
+  let count = case burnedPiles of
+                [] -> 0
+                xs -> length $ filter (\x -> rank x == r) (concat xs)
+
+      count' = case discardPile of
+                [] -> count + 0
+                xs -> count + (length $ filter (\x -> rank x == r) xs)
+  if count' >= 4 then findHighestCard (pred r)
+  else pure r
+
+
 
 -- allows me to customise the ranks of cards
 -- so special cards are better
