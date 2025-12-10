@@ -4,7 +4,6 @@ import System.Random
 import Control.Monad.State
 import Data.List
 import Data.Ord
--- check this is allowed TODO
 import Data.Maybe ( listToMaybe, fromMaybe )
 import Control.Monad (when)
 import Debug.Trace
@@ -54,6 +53,7 @@ data GameState = GameState
   , threes        :: Bool
   , eights        :: Bool
   , forcedPickup  :: Bool
+  , iterations    :: Int
   } deriving (Show)
 
 
@@ -257,32 +257,53 @@ checkTopFour discard
 -- otherwise calls again
 gameLoop :: State GameState String
 gameLoop = do
-  applyStrategy
-  currentIx <- gets currentIx
+  currentIxx <- gets currentIx
   playerList <- gets players
-  ogFinishedOrder <- gets finishedOrder
-
-  -- figures out if there is a winner yet or not
-  if null (hand (playerList!!currentIx)) &&
-     null (faceUp (playerList!!currentIx)) &&
-     null (faceDown (playerList!!currentIx)) then do
-      modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [playerList!!currentIx]}
-      modify $ \x -> x {players = filter (\p -> pId p /= pId (playerList!!currentIx)) playerList}
-      players <- gets players
-      modify (\x -> x {currentIx = if currentIx >= length players then 0 else currentIx})
-
-      case players of
-        [x] -> do
-          finishedOrder <- gets finishedOrder
-          let order = show (finishedOrder ++ players)
-          pure order
-        _ -> do
-          gameLoop
-
+  
+  -- Safety check BEFORE applyStrategy
+  if currentIxx >= length playerList 
+  then pure $ "Error before applyStrategy: index " ++ show currentIxx ++ " >= length " ++ show (length playerList)
   else do
-    gs <- get
-    modify (\x -> x {currentIx = nextPlayer gs })
-    gameLoop
+    applyStrategy
+    
+    currentIx' <- gets currentIx
+    playerList' <- gets players
+    ogFinishedOrder <- gets finishedOrder
+    iterations <- gets iterations
+    modify $ \gs -> gs {iterations = iterations + 1}
+    
+    -- Check iteration limit first
+    if iterations >= 150 then
+      pure $ show ogFinishedOrder
+    else if currentIx' >= length playerList' then
+      pure $ "Error after applyStrategy: index " ++ show currentIx' ++ " >= length " ++ show (length playerList')
+    else do
+      let currentPlayer = playerList' !! currentIx'
+      
+      -- Check if current player has finished
+      if null (hand currentPlayer) && 
+         null (faceUp currentPlayer) && 
+         null (faceDown currentPlayer) then do
+        -- Player finished
+        modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [currentPlayer] }
+        modify $ \x -> x { players = filter (\p -> pId p /= pId currentPlayer) playerList' }
+        
+        players <- gets players
+        case players of
+          [x] -> do
+            finishedOrder <- gets finishedOrder
+            pure $ show (finishedOrder ++ players)
+          _ -> do
+            modify (\gs -> gs {currentIx = nextPlayer gs})
+            gameLoop
+      else do
+        -- Current player hasn't finished
+        case playerList' of
+          [x] -> pure $ show (ogFinishedOrder ++ playerList')
+          _ -> do
+            modify (\gs -> gs {currentIx = nextPlayer gs})
+            gameLoop
+
 
 -- sets up a game with three players and plays one, outputs the result
 playOneGame :: IO ()
@@ -324,6 +345,7 @@ playOneGame = do
     , threes = False
     , eights = False
     , forcedPickup = False
+    , iterations = 0
     }
 
   let (result, finalState) = runState setupAndPlay initialState
@@ -369,19 +391,22 @@ chooseStartingPlayer = do
 -- if none have the rank, moves to the next rank. Otherwise will return the player
 -- with the most
 findStartPlayer :: Rank -> State GameState ()
-findStartPlayer n = do
+findStartPlayer n
+  -- catch all, should never be possible to happen
+  | n == RA = modify $ \gs -> gs { currentIx = 0 }
   -- gets players, filters hand to number of rank n, sorts based on that number
   -- if first card is of right rank, then it will give them first turn
-  players <- gets players
-  let playersOrdRank = [(y, x) | x <- players, let y = length . filter (== n) . map rank $ hand x, y > 0]
-  case playersOrdRank of
-    [] -> findStartPlayer $ succ n
-    _ -> do
-          if (rank . head . hand . snd . head) playersOrdRank == n then do
-            modify $ \gs -> gs { currentIx = pId (snd (head playersOrdRank)) }
-            pure ()
-          else
-            findStartPlayer $ succ n
+  | otherwise = do 
+                  players <- gets players
+                  let playersOrdRank = [(y, x) | x <- players, let y = length . filter (== n) . map rank $ hand x, y > 0]
+                  case playersOrdRank of
+                    [] -> findStartPlayer $ succ n
+                    _ -> do
+                          if (rank . head . hand . snd . head) playersOrdRank == n then do
+                            modify $ \gs -> gs { currentIx = pId (snd (head playersOrdRank)) }
+                            pure ()
+                          else
+                            findStartPlayer $ succ n
 
 
 
@@ -419,7 +444,10 @@ gameLoopWithHistory = do
   currentIx <- gets currentIx
   playerList <- gets players
   ogFinishedOrder <- gets finishedOrder
-  discard <- gets discardPile --TODO remove this line
+  
+
+  iterations <- gets iterations
+  modify $ \gs -> gs {iterations = iterations + 1}
 
   -- figures out if there is a winner yet or not
   if null (hand (playerList!!currentIx)) &&
@@ -439,11 +467,10 @@ gameLoopWithHistory = do
         _ -> do
           outputStats
           gameLoopWithHistory
+  else if iterations >= 150 then
+    pure $ show ogFinishedOrder
   else do
-    modify (\x -> x {currentIx = if currentIx == length playerList - 1 then
-                      0
-                    else
-                      currentIx + 1})
+    modify (\gs -> gs {currentIx = nextPlayer gs })
     outputStats
     gameLoopWithHistory
 
@@ -510,6 +537,7 @@ runOneGameWithHistory = do
     , threes = False
     , eights = False
     , forcedPickup = False
+    , iterations = 0
     }
 
   let (result, finalState) = runState setupAndPlayWithHistory initialState
@@ -565,6 +593,7 @@ playOneGameStep4 xs = do
       , threes = False
       , eights = False
       , forcedPickup = False
+      , iterations = 0
       }
       modifiedState = if ExtReverse8 `elem` xs
                       then baseState { eights = True }
@@ -611,7 +640,7 @@ smartStrategy = do
   -- if next player is about to win/finish hand, play high card
   -- if discardPile is big, then play second third highest card (unless given opportunity to play 5 or lower)
 
-  pure $ chooseBestCard topCard cards
+  chooseBestCard topCard cards
 
 -- decides where to get the cards from, hand, faceUp or faceDown
 chooseFromWhere :: Player -> String
@@ -624,31 +653,35 @@ chooseFromWhere player =
 
 -- if player is close to winning, then be aggressive
 -- if can clear, and big discard pile, then clear (safety)
-chooseBestCard :: Maybe Card -> [Card] -> [Card]
-chooseBestCard discardPile cards =
+chooseBestCard :: Maybe Card -> [Card] -> State GameState [Card]
+chooseBestCard discardPile cards = do
+  highestRank <- findHighestCard RA
   let ordCards = sortBy (comparing (rankValue .  rank)) cards
       legal = validPlays discardPile ordCards
-      highestRank = findHighestCard RA
-      sndHighestRank = pred <$> highestRank
-  in
-    if null legal then
-      []
-    else
-      let minRank = rank (head legal)
-      in
-        case discardPile of
-        Nothing -> [x | x <- legal, rank x == minRank]
-        _ -> case minRank of
-              R2 -> case legal of
-                      [x] -> [x]
-                      _ -> chooseBestCard discardPile [x | x <- legal, rank x /= R2]
-              R10 -> case legal of
-                      [x] -> [x]
-                      _ -> chooseBestCard discardPile [x | x <- legal, rank x /= R10]
-              
-              x | x == highestRank -> pure $ head $ filter (\x -> rank x == minRank) cards
-              x | x == sndHighestRank -> pure $ head $ filter (\x -> rank x == minRank) cards
-              _ -> [x | x <- legal, rank x == minRank]
+      sndHighestRank = pred highestRank
+  
+  if null legal then
+    pure []
+  else
+    let minRank = rank (head legal)
+    in
+      case discardPile of
+      Nothing -> pure [x | x <- legal, rank x == minRank]
+      _ -> case minRank of
+            R2 -> case legal of
+                    [x] -> pure [x]
+                    _ -> chooseBestCard discardPile [x | x <- legal, rank x /= R2]
+            R10 -> case legal of
+                    [x] -> pure [x]
+                    _ -> chooseBestCard discardPile [x | x <- legal, rank x /= R10]
+            R8 -> case legal of
+                    [x] -> pure [x]
+                    _ -> chooseBestCard discardPile [x | x <- legal, rank x /= R8]
+            x | x == highestRank -> pure $ [head $ filter (\x -> rank x == minRank) cards]
+            x | x == sndHighestRank -> pure $ [head $ filter (\x -> rank x == minRank) cards]
+            _ -> pure [x | x <- legal, rank x == minRank]
+
+
 
 -- searches through the burnedPiles and discardPile,
 -- checks if the rank passed in has been completely used
@@ -673,19 +706,19 @@ findHighestCard r = do
 -- so special cards are better
 -- uses pattern matching
 rankValue :: Rank -> Int
-rankValue R2 = 100
-rankValue R10 = 99
-rankValue RA = 12
-rankValue RK = 11
-rankValue RQ = 10
-rankValue RJ = 9
-rankValue R9 = 8
-rankValue R8 = 7
-rankValue R7 = 6
-rankValue R6 = 5
-rankValue R5 = 4
-rankValue R4 = 3
-rankValue R3 = 2
+rankValue R8 = 14
+rankValue R10 = 15
+rankValue R2 = 11
+rankValue RA = 10
+rankValue RK = 9
+rankValue RQ = 8
+rankValue RJ = 7
+rankValue R9 = 6
+rankValue R7 = 5
+rankValue R6 = 4
+rankValue R5 = 3
+rankValue R4 = 2
+rankValue R3 = 1
 
 -- runs n games, tallies results up, outputs them
 playTournament :: Int -> IO [(String, Int)]
@@ -734,6 +767,7 @@ playOneGameTourney xs = do
       , threes = False
       , eights = False
       , forcedPickup = False
+      , iterations = 0
       }
       modifiedState = if ExtReverse8 `elem` xs
                       then baseState { eights = True }
@@ -744,7 +778,8 @@ playOneGameTourney xs = do
       modifiedState'' = if ExtNineClubs `elem` xs
                         then modifiedState' { nines = True }
                         else modifiedState'
-      (result, finalState) = runState setupAndPlayWithHistory modifiedState''
+      (result, finalState) = runState setupAndPlay modifiedState''
 
   pure [strategy $ head $ finishedOrder finalState]
+
 
