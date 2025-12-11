@@ -70,9 +70,9 @@ data Extension = ExtReverse8 | ExtThree3s | ExtNineClubs
 legalPlay :: Maybe Card -> Card -> Bool
 legalPlay Nothing _ = True
 legalPlay (Just (Card pileRank _)) (Card cardRank _)
+  | pileRank == R7 = if cardRank <= pileRank then True else False
   | cardRank == R2 || cardRank == R8 || cardRank == R10 = True
   | cardRank >= pileRank = True
-  | pileRank == R7 && cardRank <= pileRank = True
   | otherwise = False
 
 -- Returns a list of the legal cards to play on top of a card
@@ -642,20 +642,21 @@ chooseFromWhere player =
 -- if opportunity to clear, then clear, want cards out of the game as fast as possible
 --
 chooseBestCard :: Maybe Card -> [Card] -> State GameState [Card]
-chooseBestCard discardPile cards = do
+chooseBestCard discard cards = do
   gs <- get
   players <- gets players
   drawPile <- gets drawPile
   currentIx <- gets currentIx
+  discardPile <- gets discardPile
   let nextIx = nextPlayer gs
       succPlayer = players!!nextIx
   case hand succPlayer of
     [] -> case faceUp succPlayer of
-            [] -> aggressivePlay discardPile cards
-            _ -> normalPlay discardPile cards
-    hand -> do if length hand < 3 && length discardPile >= 6 then
-                  aggressivePlay discardPile cards
-                else normalPlay discardPile cards
+            [] -> aggressivePlay discard cards
+            _ -> normalPlay discard cards
+    hand -> do if length hand < 3 && length drawPile <= 5 then
+                  aggressivePlay discard cards
+                else normalPlay discard cards
 
 aggressivePlay :: Maybe Card -> [Card] -> State GameState [Card]
 aggressivePlay discardPile cards = do
@@ -674,7 +675,12 @@ aggressivePlay discardPile cards = do
             let sndMaxRank = rank $ maximum [x | x <- legal, rank x /= maxRank]  -- second max rank
                 allOfSndMaxRank = [x | x <- legal, rank x == sndMaxRank]
             in case sndMaxRank of
-                -- Play one power card at a time
+                -- Play multiple power cards at a time when drawPile is empty
+                R2  | length cards > 1 && drawPile == [] -> pure allOfSndMaxRank
+                R10 | length cards > 1 && drawPile == [] -> pure allOfSndMaxRank
+                R8  | length cards > 1 && drawPile == [] -> pure allOfSndMaxRank
+                RA  | length cards > 1 && drawPile == [] -> pure allOfSndMaxRank
+                -- play a single power card when drawPile isn't empty
                 R2  | length cards > 1 -> pure [head allOfSndMaxRank]
                 R10 | length cards > 1 -> pure [head allOfSndMaxRank]
                 R8  | length cards > 1 -> pure [head allOfSndMaxRank]
@@ -685,6 +691,8 @@ aggressivePlay discardPile cards = do
 
 normalPlay :: Maybe Card -> [Card] -> State GameState [Card]
 normalPlay discardPile cards = do
+  drawPile <- gets drawPile
+  sevens <- findSevens
   let legal = validPlays discardPile cards
   if null legal then
     pure []
@@ -692,15 +700,46 @@ normalPlay discardPile cards = do
     let minRank = rank (minimum legal)  -- lowest rank
         allOfMinRank = [x | x <- legal, rank x == minRank]
     in case minRank of
-      -- Play one power card at a time
+      -- want to keep a 7 most of the time, to protect against other 7s, unless all 7s have gone
+      R7  | length cards > 1 && sevens -> let minCards = [x | x <- legal, rank x /= R7]
+                                          in case minCards of
+                                              [] -> pure allOfMinRank
+                                              _  -> let sndMinRank = rank $ minimum minCards
+                                                    in pure [x | x <- legal, rank x == sndMinRank]
+                            
+      -- Play multiple power cards at a time when drawPile is empty
+      R2  | length cards > 1 && drawPile == [] -> pure allOfMinRank
+      R10 | length cards > 1 && drawPile == [] -> pure allOfMinRank
+      R8  | length cards > 1 && drawPile == [] -> pure allOfMinRank
+      RA  | length cards > 1 && drawPile == [] -> pure allOfMinRank
+      -- play a single power card when drawPile isn't empty
       R2  | length cards > 1 -> pure [head allOfMinRank]
       R10 | length cards > 1 -> pure [head allOfMinRank]
       R8  | length cards > 1 -> pure [head allOfMinRank]
       RA  | length cards > 1 -> pure [head allOfMinRank]
       
-      -- Play ALL cards of low ranks (3-7) to get rid of them fast
       _ -> pure allOfMinRank
 
+
+-- searches through burnedPiles and discardPile to find 7s
+findSevens :: State GameState Bool
+findSevens = do
+  burnedPiles <- gets burnedPiles
+  discardPile <- gets discardPile
+  players <- gets players
+  currentIx <- gets currentIx
+  let player = players!!currentIx
+      count = case burnedPiles of
+                [] -> 0
+                xs -> length $ filter (\x -> rank x == R7) (concat xs)
+
+      count' = case discardPile of
+                [] -> count + 0
+                xs -> count + (length $ filter (\x -> rank x == R7) xs) 
+      count'' = case hand player of
+                [] -> count' + 0
+                xs -> count' + (length $ filter (\x -> rank x == R7) xs) 
+  if count'' >= 4 then pure True else pure False
 
 -- searches through the burnedPiles and discardPile,
 -- checks if the rank passed in has been completely used
@@ -748,9 +787,9 @@ playOneGameTourney xs = do
   let deck = [Card r s | s <- [Clubs .. Spades], r <- [R2 .. RA]]
   let shuffledDeck = shuffleDeck gen deck
   -- create players
-  let initialPlayers = [ Player 0 "p1" [] [] [] "basic"
+  let initialPlayers = [ Player 0 "p1" [] [] [] "smart"
                        , Player 1 "p2" [] [] [] "basicSets"
-                       , Player 2 "p3" [] [] [] "smart"
+                       , Player 2 "p3" [] [] [] "basic"
                        ]
   -- create gameState
   let baseState = GameState { players = initialPlayers
