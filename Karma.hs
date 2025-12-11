@@ -603,6 +603,7 @@ smartStrategy = do
   let player = players!!currentIx
       nextPlayerIx = (currentIx + 1) `mod` length players
       nextPlayer = players!!nextPlayerIx
+      -- easy way to check if the player is on faceDown, otherwise need multiple case/if statements
       nextPlayerCardCount = length (hand nextPlayer) + length (faceUp nextPlayer) + length (faceDown nextPlayer)
       isNextPlayerLow = nextPlayerCardCount <= 3
   case hand player of
@@ -630,7 +631,11 @@ smartStrategy = do
 
 -- returns the maximum card by my special cardRank
 maximumByCardRank :: [Card] -> Card
-maximumByCardRank = maximumBy (comparing (cardRank . rank))
+maximumByCardRank cards = 
+  let nonSpecial = [x | x <- cards, rank x /= R2, rank x /= R10]
+  in if null nonSpecial then
+        maximumBy (comparing (cardRank . rank)) cards
+    else maximumBy (comparing (cardRank . rank)) nonSpecial
 
 -- returns the minimum card by my special cardRank
 minimumByCardRank :: [Card] -> Card
