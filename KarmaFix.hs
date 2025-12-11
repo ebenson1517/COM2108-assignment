@@ -191,7 +191,7 @@ applyStrategy = do
   nines <- gets nines
   eights <- gets eights
   burnedPiles <- gets burnedPiles
-  when (nines && discard' /= [] && rank (head discard') == R9) stealCard
+  --when (nines && discard' /= [] && rank (head discard') == R9) stealCard
   let action | discard' /= [] && rank (head discard') == R10 = do modify (\x -> x {discardPile = [], burnedPiles = burnedPiles ++ [discard']})
              | checkTopFour discard' = modify (\x -> x {discardPile = [], burnedPiles = burnedPiles ++ [discard'] })
              | eights && discard' /= [] && rank (head discard') == R8 = do
@@ -225,8 +225,12 @@ stealCard = do
     [] -> pure ()
     _ -> do gen <- gets rng
             let player = players!!currentIx
-                updatedPlayer = player {hand = hand player ++ shuffleDeck gen (hand $ players!!(nextPlayer gs)) }
+                victim = players!!(nextPlayer gs)
+                result = shuffleDeck gen (hand victim)
+                updatedPlayer = player {hand = hand player ++ result}
+                updatedPlayer' = player {hand = filter (`notElem` result) (hand victim)}
             updatePlayer updatedPlayer
+            updatePlayer victim
 
 -- returns index of the next player in turn
 nextPlayer :: GameState -> Int
@@ -257,12 +261,12 @@ checkTopFour discard
 -- otherwise calls again
 gameLoop :: State GameState String
 gameLoop = do
-  currentIxx <- gets currentIx
+  currentIx' <- gets currentIx
   playerList <- gets players
   
   -- Safety check BEFORE applyStrategy
-  if currentIxx >= length playerList 
-  then pure $ "Error before applyStrategy: index " ++ show currentIxx ++ " >= length " ++ show (length playerList)
+  if currentIx' >= length playerList 
+  then pure $ "Error before applyStrategy: index " ++ show currentIx' ++ " >= length " ++ show (length playerList)
   else do
     applyStrategy
     
@@ -284,18 +288,19 @@ gameLoop = do
       if null (hand currentPlayer) && 
          null (faceUp currentPlayer) && 
          null (faceDown currentPlayer) then do
-        -- Player finished
-        modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [currentPlayer] }
-        modify $ \x -> x { players = filter (\p -> pId p /= pId currentPlayer) playerList' }
+        -- Player finished - manually calculate safe index
+        let newPlayers = filter (\p -> pId p /= pId currentPlayer) playerList'
+            newIx = if currentIx' >= length newPlayers then 0 else currentIx'
         
-        players <- gets players
-        case players of
+        modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [currentPlayer] }
+        modify $ \x -> x { players = newPlayers }
+        modify $ \x -> x { currentIx = newIx }
+        
+        case newPlayers of
           [x] -> do
             finishedOrder <- gets finishedOrder
-            pure $ show (finishedOrder ++ players)
-          _ -> do
-            modify (\gs -> gs {currentIx = nextPlayer gs})
-            gameLoop
+            pure $ show (finishedOrder ++ newPlayers)
+          _ -> gameLoop
       else do
         -- Current player hasn't finished
         case playerList' of
@@ -303,7 +308,6 @@ gameLoop = do
           _ -> do
             modify (\gs -> gs {currentIx = nextPlayer gs})
             gameLoop
-
 
 -- sets up a game with three players and plays one, outputs the result
 playOneGame :: IO ()
