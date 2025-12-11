@@ -601,19 +601,40 @@ smartStrategy = do
   players <- gets players
   currentIx <- gets currentIx
   discardPile <- gets discardPile
+  drawPile <- gets drawPile
   let player = players!!currentIx
-  -- check for 10s, 2s and 8s
+      nextPlayerIx = (currentIx + 1) `mod` length players
+      nextPlayer = players!!nextPlayerIx
+      nextPlayerCardCount = length (hand nextPlayer) + length (faceUp nextPlayer) + length (faceDown nextPlayer)
+      isNextPlayerLow = nextPlayerCardCount <= 3
   case hand player of
     [] -> case faceUp player of
-            [] -> pure [head (faceDown player)]
-            _ -> case filter (legalPlay (head' discardPile)) (faceUp player) of
-                   [] -> pure []
-                   legal -> pure [minimumByCardRank legal]
+      [] -> pure [head (faceDown player)]
+      _ -> case filter (legalPlay (head' discardPile)) (faceUp player) of
+        [] -> pure []
+        legal -> pure [minimumByCardRank legal]
     _ -> case filter (legalPlay (head' discardPile)) (hand player) of
-           [] -> pure []
-           legal -> let minRank = rank (minimumByCardRank legal)
-                    in pure [x | x <- legal, rank x == minRank]
+      [] -> pure []
+      legal -> let -- If next player is low, play highest rank card, otherwise lowest
+                   targetCard = if isNextPlayerLow 
+                                then maximumByCardRank legal 
+                                else minimumByCardRank legal
+                   targetRank = rank targetCard
+                   targetRankCards = [x | x <- legal, rank x == targetRank]
+                   isPowerCard c = cardRank (rank c) >= 10
+                   -- If draw pile is empty, play all matching cards, so catch up
+                   -- If card selected is powercard and don't need to catch up, play one at a time
+               in if null drawPile
+                  then pure targetRankCards
+                  else if isPowerCard targetCard
+                       then pure [targetCard]
+                       else pure targetRankCards
 
+-- returns the maximum card by my special cardRank
+maximumByCardRank :: [Card] -> Card
+maximumByCardRank cards = maximumBy (comparing (cardRank . rank)) cards
+
+-- returns the minimum card by my special cardRank
 minimumByCardRank :: [Card] -> Card
 minimumByCardRank cards = minimumBy (comparing (cardRank . rank)) cards
 
