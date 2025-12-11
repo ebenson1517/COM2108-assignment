@@ -277,7 +277,7 @@ gameLoop = do
     modify $ \gs -> gs {iterations = iterations + 1}
     
     -- Check iteration limit first
-    if iterations >= 150 then
+    if iterations >= 1000 then
       pure $ show ogFinishedOrder
     else if currentIx' >= length playerList' then
       pure $ "Error after applyStrategy: index " ++ show currentIx' ++ " >= length " ++ show (length playerList')
@@ -782,8 +782,11 @@ playOneGameTourney xs = do
       modifiedState'' = if ExtNineClubs `elem` xs
                         then modifiedState' { nines = True }
                         else modifiedState'
-      (result, finalState) = runState setupAndPlay modifiedState''
+      (result, finalState) = runState setupAndPlayWithHistory modifiedState''
 
-  pure [strategy $ head $ finishedOrder finalState]
+      finished = finishedOrder finalState
+  case finished of
+    [] -> pure []
+    x -> pure [strategy $ head $ x]
 
 
