@@ -614,20 +614,33 @@ smartStrategy = do
                   legal -> pure [minimumByCardRank legal]
     _ -> case filter (legalPlay (head' discardPile)) (hand player) of
           [] -> pure []
-          legal -> let -- If next player is low, play highest rank card, otherwise lowest
-                   targetCard = if isNextPlayerLow
-                                then maximumByCardRank legal
-                                else minimumByCardRank legal
-                   targetRank = rank targetCard
-                   targetRankCards = [x | x <- legal, rank x == targetRank]
-                   isPowerCard c = cardRank (rank c) >= 10
-                   -- If draw pile is empty, play all matching cards, so catch up
-                   -- If card selected is powercard and don't need to catch up, play one at a time
-               in if null drawPile
-                  then pure targetRankCards
-                  else if isPowerCard targetCard
-                       then pure [targetCard]
-                       else pure targetRankCards
+          legal ->  let isPowerCard c = cardRank (rank c) >= 10
+                        -- If draw pile is empty, don't filter out power cards
+                        playableCards = if null drawPile
+                                        then legal
+                                        else filter (not . isPowerCard) legal
+                        -- If no non-power cards available (and draw pile not empty), must use power cards
+                        cardsToConsider = if null playableCards && not (null drawPile)
+                                          then legal
+                                          else playableCards
+                        -- If next player is low, play highest rank card, otherwise lowest
+                        targetCard = if isNextPlayerLow
+                                      then maximumByCardRank cardsToConsider
+                                      else minimumByCardRank cardsToConsider
+                        targetRank = rank targetCard
+                        targetRankCards = [x | x <- cardsToConsider, rank x == targetRank]
+                    -- If draw pile is empty, play all matching cards
+                    -- If being aggressive (next player low), play one card only
+                    -- If card selected is powercard and draw pile not empty, play one at a time
+                    -- Otherwise play all matching cards
+                    in if null drawPile
+                        then pure targetRankCards
+                        else if isNextPlayerLow
+                            then pure [targetCard]
+                            else if isPowerCard targetCard
+                                  then pure [targetCard]
+                                  else pure targetRankCards
+
 
 -- returns the maximum card by my special cardRank
 maximumByCardRank :: [Card] -> Card
