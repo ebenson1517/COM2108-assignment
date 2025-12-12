@@ -630,7 +630,7 @@ smartStrategy = do
                         targetRank = rank targetCard
                         targetRankCards = [x | x <- cardsToConsider, rank x == targetRank]
                     -- If draw pile is empty, play all matching cards
-                    -- If being aggressive (next player low), play one card only
+                    -- If being aggressive, play one card only
                     -- If card selected is powercard and draw pile not empty, play one at a time
                     -- Otherwise play all matching cards
                     in if null drawPile
@@ -654,6 +654,8 @@ maximumByCardRank cards =
 minimumByCardRank :: [Card] -> Card
 minimumByCardRank = minimumBy (comparing (cardRank . rank))
 
+-- lets me assign new ranks to the card ranks for better
+-- card selection using pattern matching
 cardRank :: Rank -> Int
 cardRank RA = 13
 cardRank R8 = 12
