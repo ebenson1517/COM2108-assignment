@@ -103,7 +103,8 @@ giveWastePileTo player = do
 -- and replaces it
 updatePlayer :: Player -> State GameState ()
 updatePlayer updatedPlayer = modify $ \gs ->
-  gs { players = map (\p -> if pId p == pId updatedPlayer then updatedPlayer else p) (players gs) }
+  gs { players = map (\p -> if pId p == pId updatedPlayer 
+                            then updatedPlayer else p) (players gs) }
 
 -- adds cards to a players hand until they have three cards again
 replenishCards :: Player -> State GameState ()
@@ -119,7 +120,8 @@ replenishCards player = do
 
 -- shuffles a deck passed in
 shuffleDeck :: StdGen -> Deck -> Deck
-shuffleDeck gen deck = [x | (x, _) <- sortBy (comparing snd) (zip deck (randoms gen :: [Int]))]
+shuffleDeck gen deck = [x | (x, _) <- sortBy (comparing snd) 
+                                      (zip deck (randoms gen :: [Int]))]
 
 --------------------------------------------------------------------------------
 -- Step 2 
@@ -160,9 +162,13 @@ applyStrategy = do
   discard <- gets discardPile
 
   -- check forcedPickup
-  when (threes && forcedPickup) $ let updatedPlayer = (players'!!currentIx) {hand = hand (players'!!currentIx) ++ discard}
+  when (threes && forcedPickup) $ let updatedPlayer = 
+                                                      (players'!!currentIx) 
+                                                      {hand = hand (players'!!currentIx)
+                                                       ++ discard}
                                   in do updatePlayer updatedPlayer
-                                        modify $ \gs -> gs {discardPile = [], forcedPickup = False}
+                                        modify $ \gs -> gs {discardPile = []
+                                        , forcedPickup = False}
 
   result <- case strategy $ players'!!currentIx of
     "basic" -> basicStrategy
@@ -183,20 +189,25 @@ applyStrategy = do
   modify $ \x -> x {discardPile = result ++ discard}
   discard' <- gets discardPile
   -- check after play effects
-  -- https://stackoverflow.com/questions/59778472/guard-inside-do-block-haskell
-  -- TODO might want to check all actions accounted for, need to add to burnedPiles
   -- nines need to be outside
   nines <- gets nines
   eights <- gets eights
   burnedPiles <- gets burnedPiles
   --when (nines && discard' /= [] && rank (head discard') == R9) stealCard
-  let action | discard' /= [] && rank (head discard') == R10 = do modify (\x -> x {discardPile = [], burnedPiles = burnedPiles ++ [discard']})
-             | checkTopFour discard' = modify (\x -> x {discardPile = [], burnedPiles = burnedPiles ++ [discard'] })
-             | eights && discard' /= [] && rank (head discard') == R8 = do
-                                                                        order <- gets order
-                                                                        modify $ \gs -> gs { order = not order}
+  let action | discard' /= [] 
+                && rank (head discard') == R10 = do 
+                                                  modify (\x -> x {discardPile = []
+                                                  , burnedPiles = burnedPiles
+                                                  ++ [discard']})
+             | checkTopFour discard' = modify (\x -> x {discardPile = []
+                                        , burnedPiles = burnedPiles ++ [discard'] })
+             | eights && discard' /= []
+                && rank (head discard') == R8 = do
+                                                  order <- gets order
+                                                  modify $ \gs -> gs { order = not order}
               -- checks top four first so must only be top three threes
-             | checkTopThree discard' = modify $ \gs -> gs {forcedPickup = True}
+             | checkTopThree discard' = 
+                modify $ \gs -> gs {forcedPickup = True}
              | otherwise = pure ()
   action
 
@@ -250,7 +261,10 @@ checkTopThree _             = False
 -- checks if top four cards are the same
 checkTopFour :: Pile -> Bool
 checkTopFour discard
-  | length discard >= 4 = rank (head discard) == rank (discard!!1) && rank (discard!!1) == rank (discard!!2) && rank (discard!!2) == rank (discard!!3)
+  | length discard >= 4 = rank (head discard)
+      == rank (discard!!1) && rank (discard!!1)
+      == rank (discard!!2) && rank (discard!!2)
+      == rank (discard!!3)
   | otherwise = False
 
 -- game Loop, executes a full turn
@@ -273,7 +287,8 @@ gameLoop = do
      null (faceUp (playerList!!currentIx)) &&
      null (faceDown (playerList!!currentIx)) then do
       modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [playerList!!currentIx]}
-      modify $ \x -> x {players = filter (\p -> pId p /= pId (playerList!!currentIx)) playerList}
+      modify $ \x -> x {players 
+                        = filter (\p -> pId p /= pId (playerList!!currentIx)) playerList}
       players <- gets players
       modify (\x -> x {currentIx = if currentIx >= length players then 0 else currentIx})
       case players of
@@ -382,12 +397,14 @@ findStartPlayer n
   -- if first card is of right rank, then it will give them first turn
   | otherwise = do
                   players <- gets players
-                  let playersOrdRank = [(y, x) | x <- players, let y = length . filter (== n) . map rank $ hand x, y > 0]
+                  let 
+                    playersOrdRank = [(y, x) | x <- players, let y = length . filter (== n) . map rank $ hand x, y > 0]
                   case playersOrdRank of
                     [] -> findStartPlayer $ succ n
                     _ -> do
-                          if (rank . head . hand . snd . head) playersOrdRank == n then do
-                            modify $ \gs -> gs { currentIx = pId (snd (head playersOrdRank)) }
+                          if (rank . head . hand . snd . head) playersOrdRank ==n then do
+                            modify $ \gs -> gs 
+                              { currentIx = pId (snd (head playersOrdRank)) }
                             pure ()
                           else
                             findStartPlayer $ succ n
@@ -438,9 +455,11 @@ gameLoopWithHistory = do
      null (faceUp (playerList!!currentIx)) &&
      null (faceDown (playerList!!currentIx)) then do
       modify $ \x -> x { finishedOrder = ogFinishedOrder ++ [playerList!!currentIx]}
-      modify $ \x -> x {players = filter (\p -> pId p /= pId (playerList!!currentIx)) playerList}
+      modify $ \x -> x 
+          {players = filter (\p -> pId p /= pId (playerList!!currentIx)) playerList}
       messages <- gets messages
-      modify $ \gs -> gs { messages = messages ++ "player out" ++ show (playerList!!currentIx) ++ "\n"}
+      modify $ \gs -> gs 
+          { messages = messages ++ "player out" ++ show (playerList!!currentIx) ++ "\n"}
       players <- gets players
       modify (\x -> x {currentIx = if currentIx >= length players then 0 else currentIx})
       case players of
@@ -469,12 +488,16 @@ outputStats = do
   case length drawPile of
     drawSize -> do
       messages <- gets messages
-      modify $ \gs -> gs { messages = messages ++ "Start player: " ++ show (players!!currentIx) ++ "\n"}
+      modify $ \gs -> gs 
+          { messages = messages ++ "Start player: " ++ show (players!!currentIx) ++ "\n"}
   messages' <- gets messages
-  modify $ \gs -> gs { messages = messages' ++ "current player state: " ++ show (players!!currentIx) ++ "\n"}
+  modify $ \gs -> gs 
+    {messages = messages' 
+      ++ "current player state: " ++ show (players!!currentIx) ++ "\n"}
   discard <- gets discardPile
   messages'' <- gets messages
-  modify $ \gs -> gs { messages = messages'' ++ "current discard: " ++ show discard  ++ "\n"}
+  modify $ \gs -> gs
+      { messages = messages'' ++ "current discard: " ++ show discard  ++ "\n"}
   messages''' <- gets messages
   case discard of
     [] -> modify $ \gs -> gs { messages = messages''' ++ "discard burned" ++ "\n"}
@@ -603,8 +626,10 @@ smartStrategy = do
   let player = players!!currentIx
       nextPlayerIx = (currentIx + 1) `mod` length players
       nextPlayer = players!!nextPlayerIx
-      -- easy way to check if the player is on faceDown, otherwise need multiple case/if statements
-      nextPlayerCardCount = length (hand nextPlayer) + length (faceUp nextPlayer) + length (faceDown nextPlayer)
+      -- easy way to check if the player is on faceDown, 
+      -- otherwise need multiple case/if statements
+      nextPlayerCardCount = length (hand nextPlayer) 
+          + length (faceUp nextPlayer) + length (faceDown nextPlayer)
       isNextPlayerLow = nextPlayerCardCount <= 3
   case hand player of
     [] -> case faceUp player of
@@ -619,19 +644,20 @@ smartStrategy = do
                         playableCards = if null drawPile
                                         then legal
                                         else filter (not . isPowerCard) legal
-                        -- If no non-power cards available (and draw pile not empty), must use power cards
+                        -- If no normal cards, must use power cards
                         cardsToConsider = if null playableCards && not (null drawPile)
                                           then legal
                                           else playableCards
-                        -- If next player is low, play highest rank card, otherwise lowest
+                        -- If next player is low, play highest rank card
                         targetCard = if isNextPlayerLow
                                       then maximumByCardRank cardsToConsider
                                       else minimumByCardRank cardsToConsider
                         targetRank = rank targetCard
-                        targetRankCards = [x | x <- cardsToConsider, rank x == targetRank]
+                        targetRankCards = [x | x <- cardsToConsider, rank x ==targetRank]
                     -- If draw pile is empty, play all matching cards
                     -- If being aggressive, play one card only
-                    -- If card selected is powercard and draw pile not empty, play one at a time
+                    -- If card selected is powercard and draw pile not empty, 
+                    -- play one at a time
                     -- Otherwise play all matching cards
                     in if null drawPile
                         then pure targetRankCards
